@@ -9,6 +9,8 @@ const escapeHTML = (value) =>
       ],
   );
 const names = {
+  workflows: ["Workflows", "Design how work moves from an issue to a reviewed result."],
+  prompts: ["Prompts", "Shape agent instructions and choose where changes are adopted."],
   connectors: ["Connectors", "Manage service connections and credentials for your repositories."],
   overview: [
     "Operations overview",
@@ -67,6 +69,7 @@ function setHTML(element, html) {
 }
 function resetAccess() {
   accessVersion++;
+  if (typeof resetConfiguration === "function") resetConfiguration();
   clearJiraSearch();
   if ($("launch").open) $("launch").close();
   pendingLaunch = null;
@@ -110,7 +113,8 @@ const empty = (title, body = "") =>
 const jobButton = (job, text) =>
   `<button data-job="${escapeHTML(job.id)}">${escapeHTML(text || job.issue.key)}</button>`;
 function page() {
-  const p = location.hash.slice(1);
+  const raw = location.hash.slice(1).split("/")[0];
+  const p = ["configuration", "lines"].includes(raw) ? "workflows" : raw;
   return Object.hasOwn(names, p) ? p : "overview";
 }
 function reportLink(jobId, artifactId) {
@@ -219,6 +223,9 @@ async function api(path) {
 }
 function route() {
   const current = page();
+  const design = ["workflows", "prompts"].includes(current);
+  document.querySelector(".filters").hidden = design;
+  $("launch-button").hidden = design;
   $("page-title").textContent = names[current][0];
   $("breadcrumb").textContent =
     current === "floor" ? "Factory floor" : names[current][0];
@@ -270,7 +277,7 @@ function overview(jobs, events) {
     )
     .join(
       "",
-    )}</div><div class="panel-note">Each case keeps its identity across retries and follow-up jobs. Approvals refer to a specific artifact version.</div></div><div class="panel"><div class="panel-head"><h2>Latest activity</h2><a href="#activity">View all →</a></div>${milestones(events, 3)}</div></div><div class="section-heading"><h2>Production lines</h2><a href="#lines">Explore workflows →</a></div><div class="line-grid">${Object.values(
+    )}</div><div class="panel-note">Each case keeps its identity across retries and follow-up jobs. Approvals refer to a specific artifact version.</div></div><div class="panel"><div class="panel-head"><h2>Latest activity</h2><a href="#activity">View all →</a></div>${milestones(events, 3)}</div></div><div class="section-heading"><h2>Production lines</h2><a href="#workflows">Explore workflows →</a></div><div class="line-grid">${Object.values(
     state.catalog.workflows,
   )
     .filter((w) => !$("workflow").value || w.id === $("workflow").value)
@@ -661,13 +668,17 @@ function render() {
     overview: () => overview(jobs, events),
     floor: () => floor(jobs, events),
     lines,
+    workflows: configurationView,
+    prompts: configurationView,
     jobs: () => jobTable(jobs),
     gates: () => gates(jobs),
     activity: () => `<div class="panel">${milestones(events, 100)}</div>`,
     platform,
     connectors,
+
   };
-  setHTML($("content"), views[p]());
+  if (["workflows", "prompts"].includes(p) && typeof renderDesign === "function") renderDesign();
+  else setHTML($("content"), views[p]());
 }
 async function refresh() {
   if (busy) {
@@ -689,6 +700,8 @@ async function refresh() {
     const connections = permissions.manage_connectors ? (await api("/api/connectors")).connectors : [];
     if (version !== accessVersion) return;
     connectorCatalog = connections;
+    if (typeof loadConfiguration === "function") await loadConfiguration();
+    if (version !== accessVersion) return;
     state = { catalog, jobs: jobs.jobs, events: events.events, loaded: true };
     for (const [id, items, caption] of [
       [
@@ -838,6 +851,8 @@ function renderDetail() {
         `${j.workflow} · v${j.snapshot.workflows[j.workflow].version}`,
       ],
       ["Repository revision", j.repository.revision],
+      ["Release", j.snapshot.release_id || "Local / draft snapshot"],
+      ["Release / candidate digest", j.snapshot.release_digest || "Legacy snapshot"],
       ["Definition hash", j.snapshot.definition_hash],
       ["Worker image", worker.image],
       ["Policy", j.snapshot.policy_version],

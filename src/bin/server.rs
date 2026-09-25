@@ -23,10 +23,6 @@ async fn main() -> Result<()> {
         "FACTORY_CONFIG",
         "config/platform.yaml",
     )))?;
-    let snapshot = platform.snapshot(
-        &PathBuf::from(env("FACTORY_WORKFLOWS", "workflows")),
-        &PathBuf::from(env("FACTORY_PROMPTS", "prompts")),
-    )?;
     let secret = std::env::var("FACTORY_WORKER_SECRET")
         .context("FACTORY_WORKER_SECRET is required; keep it stable across restarts")?;
     ensure!(
@@ -79,10 +75,48 @@ async fn main() -> Result<()> {
     }
     let store =
         Store::connect(&std::env::var("DATABASE_URL").context("DATABASE_URL is required")?).await?;
+    let source = env("FACTORY_CONFIGURATION_SOURCE", "registry");
+    ensure!(
+        matches!(source.as_str(), "files" | "registry"),
+        "configuration source must be files or registry"
+    );
+    let local_configuration = source == "files";
+    let snapshot = if local_configuration {
+        ensure!(
+            platform.allow_fixture,
+            "files mode is restricted to local development"
+        );
+        platform.snapshot(
+            &PathBuf::from(env("FACTORY_WORKFLOWS", "workflows")),
+            &PathBuf::from(env("FACTORY_PROMPTS", "prompts")),
+        )?
+    } else {
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow_releases")
+            .fetch_one(&store.pool)
+            .await?;
+        if count == 0 {
+            let initial = platform.snapshot(
+                &PathBuf::from(env("FACTORY_WORKFLOWS", "workflows")),
+                &PathBuf::from(env("FACTORY_PROMPTS", "prompts")),
+            )?;
+            factories::releases::seed(&store, &platform, &initial).await?;
+        }
+        let catalog = factories::releases::catalog(&store).await?;
+        let root = catalog
+            .keys()
+            .next()
+            .context("registry has no active workflows")?;
+        let snapshot = factories::releases::active(&store, &platform, root).await?;
+        for root in catalog.keys() {
+            factories::releases::active(&store, &platform, root).await?;
+        }
+        snapshot
+    };
     let app = Arc::new(App {
         store,
         platform,
         snapshot,
+        local_configuration,
         executor,
         blobs: Blobs {
             root: PathBuf::from(env("FACTORY_ARTIFACT_ROOT", "data/artifacts")),

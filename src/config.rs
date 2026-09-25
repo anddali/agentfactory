@@ -139,6 +139,10 @@ pub struct Prompt {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_id: Option<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_digest: Option<String>,
     pub workflows: BTreeMap<String, Workflow>,
     pub prompts: BTreeMap<String, Prompt>,
     pub workers: BTreeMap<String, WorkerProfile>,
@@ -162,14 +166,41 @@ impl Platform {
         Ok(serde_yaml::from_str(&std::fs::read_to_string(path)?)?)
     }
     pub fn snapshot(&self, directory: &Path, prompts: &Path) -> Result<Snapshot> {
-        let mut workflows = BTreeMap::new();
-        let mut resolved_prompts = BTreeMap::new();
+        let mut definitions = Vec::new();
+        let mut texts = BTreeMap::new();
         for entry in std::fs::read_dir(directory)? {
             let path = entry?.path();
-            if path.extension().is_none_or(|e| e != "yaml") {
-                continue;
+            if path.extension().is_some_and(|e| e == "yaml") {
+                definitions.push(serde_yaml::from_str::<Workflow>(&std::fs::read_to_string(
+                    path,
+                )?)?);
             }
-            let w: Workflow = serde_yaml::from_str(&std::fs::read_to_string(path)?)?;
+        }
+        for w in &definitions {
+            for task in w.phases.iter().flat_map(|p| &p.tasks) {
+                if let Some(name) = task.with.get("prompt") {
+                    ensure!(
+                        name.split('@').count() == 2 && name.split('@').all(identifier),
+                        "invalid prompt reference"
+                    );
+                    texts.insert(
+                        name.clone(),
+                        std::fs::read_to_string(prompts.join(format!("{name}.md")))
+                            .with_context(|| format!("missing prompt {name}"))?,
+                    );
+                }
+            }
+        }
+        self.resolve(definitions, &texts)
+    }
+    pub fn resolve(
+        &self,
+        definitions: Vec<Workflow>,
+        texts: &BTreeMap<String, String>,
+    ) -> Result<Snapshot> {
+        let mut workflows = BTreeMap::new();
+        let mut resolved_prompts = BTreeMap::new();
+        for w in definitions {
             w.validate()?;
             ensure!(
                 self.workers.contains_key(&w.defaults.worker_profile),
@@ -227,8 +258,14 @@ impl Platform {
                             name.split('@').count() == 2 && name.split('@').all(identifier),
                             "invalid prompt reference"
                         );
-                        let text = std::fs::read_to_string(prompts.join(format!("{name}.md")))
-                            .with_context(|| format!("missing prompt {name}"))?;
+                        let text = texts
+                            .get(name)
+                            .with_context(|| format!("missing prompt {name}"))?
+                            .clone();
+                        ensure!(
+                            !text.trim().is_empty() && text.len() <= 100_000,
+                            "prompt must contain 1–100000 bytes"
+                        );
                         resolved_prompts.insert(
                             name.clone(),
                             Prompt {
@@ -280,10 +317,7 @@ impl Platform {
             }
         }
         for (id, repo) in &self.repositories {
-            ensure!(
-                identifier(id) && workflows.contains_key(&repo.workflow),
-                "invalid repository registration"
-            );
+            ensure!(identifier(id), "invalid repository registration");
             ensure!(
                 !repo.maintainers.is_empty(),
                 "repository must have maintainers"
@@ -311,6 +345,8 @@ impl Platform {
             }
         }
         let mut snapshot = Snapshot {
+            release_id: None,
+            release_digest: None,
             definition_hash: String::new(),
             workflows,
             prompts: resolved_prompts,

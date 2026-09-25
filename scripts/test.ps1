@@ -12,6 +12,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL integration tests failed.' }
     node --check web/app.js
     if ($LASTEXITCODE -ne 0) { throw 'Portal JavaScript check failed.' }
-    node --test tests/portal-decisions.cjs
+    node --check web/configuration.js
+    if ($LASTEXITCODE -ne 0) { throw 'Configuration JavaScript check failed.' }
+    node --test tests/portal-decisions.cjs tests/portal-configuration.cjs
     if ($LASTEXITCODE -ne 0) { throw 'Portal decision tests failed.' }
 } finally { Pop-Location }

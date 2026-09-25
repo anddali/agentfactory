@@ -6,7 +6,7 @@ function New-Secret { $bytes = New-Object byte[] 32; [Security.Cryptography.Rand
 $password = New-Secret
 $workerSecret = New-Secret
 $apiToken = New-Secret
-$identities = @(@{ token = $apiToken; subject = 'local-maintainer'; roles = @('observer', 'operator', 'approver', 'connector_admin'); repositories = @('*') }) | ConvertTo-Json -Compress -AsArray
+$identities = @(@{ token = $apiToken; subject = 'local-maintainer'; roles = @('observer', 'operator', 'approver', 'connector_admin', 'configuration_editor', 'configuration_publisher'); repositories = @('*') }) | ConvertTo-Json -Compress -AsArray
 $content = "POSTGRES_PASSWORD=$password`nFACTORY_WORKER_SECRET=$workerSecret`nFACTORY_IDENTITIES='$identities'`n"
 [IO.File]::WriteAllText($envPath, $content)
 Write-Host 'Created local credentials in .env. Start with docker compose --profile build build, then docker compose up -d.'

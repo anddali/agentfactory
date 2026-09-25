@@ -22,10 +22,12 @@ async fn fixture() -> Result<Arc<App>> {
     let platform = Platform::load(Path::new("config/platform.yaml"))?;
     let snapshot = platform.snapshot(Path::new("workflows"), Path::new("prompts"))?;
     let store = Store::connect(&std::env::var("DATABASE_URL")?).await?;
+    factories::releases::seed(&store, &platform, &snapshot).await?;
     Ok(Arc::new(App {
         store,
         platform,
         snapshot,
+        local_configuration: false,
         executor: Executor {
             mode: "process".into(),
             server_url: "http://127.0.0.1:8080".into(),
@@ -351,8 +353,41 @@ async fn claimed_manifest_scopes_credentials_and_receipt_never_contains_them() -
     mutable.snapshot.workflows.get_mut("demo").unwrap().phases[0]
         .permissions
         .push("repository.read".into());
+    mutable.platform.agents.insert(
+        "phase-agent".into(),
+        mutable.snapshot.agents["phase-agent"].clone(),
+    );
+    let root = format!("credential-test-{}", Uuid::new_v4().simple());
+    let mut bundle = factories::releases::Bundle::from_snapshot(&mutable.snapshot, "demo")?;
+    let mut workflow: factories::workflow::Workflow =
+        serde_yaml::from_str(&bundle.workflows["demo"])?;
+    workflow.id = root.clone();
+    bundle.workflow = root.clone();
+    bundle.workflows.clear();
+    bundle
+        .workflows
+        .insert(root.clone(), serde_yaml::to_string(&workflow)?);
+    let id = factories::releases::publish(
+        &mutable.store,
+        &mutable.platform,
+        &bundle,
+        "test",
+        "Credential fixture",
+    )
+    .await?;
+    factories::releases::activate(
+        &mutable.store,
+        &mutable.platform,
+        id,
+        0,
+        "test",
+        "Credential fixture",
+    )
+    .await?;
+    let mut input = submission();
+    input.workflow = root;
     let job = app
-        .submit(&Uuid::new_v4().to_string(), submission(), "test")
+        .submit(&Uuid::new_v4().to_string(), input, "test")
         .await?;
     let router = api::router(app.clone(), "web");
     let response = router
@@ -751,5 +786,439 @@ async fn slack_uses_default_channel_without_repository_registration_or_selection
     )
     .await
     .is_err());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing at a disposable PostgreSQL database"]
+async fn release_registry_conflicts_rollback_and_job_pinning() -> Result<()> {
+    use factories::releases::{self, Bundle};
+    let app = fixture().await?;
+    let root = format!("release-test-{}", Uuid::new_v4().simple());
+    let mut bundle = Bundle::from_snapshot(&app.snapshot, "demo")?;
+    let mut w: factories::workflow::Workflow = serde_yaml::from_str(&bundle.workflows["demo"])?;
+    w.id = root.clone();
+    bundle.workflow = root.clone();
+    bundle.workflows.clear();
+    bundle
+        .workflows
+        .insert(root.clone(), serde_yaml::to_string(&w)?);
+    let first = releases::publish(
+        &app.store,
+        &app.platform,
+        &bundle,
+        "test",
+        "Initial candidate",
+    )
+    .await?;
+    assert_eq!(
+        first,
+        releases::publish(&app.store, &app.platform, &bundle, "test", "Same import").await?
+    );
+    assert!(releases::active(&app.store, &app.platform, &root)
+        .await
+        .is_err());
+    releases::activate(
+        &app.store,
+        &app.platform,
+        first,
+        0,
+        "test",
+        "Activate original",
+    )
+    .await?;
+    let mut input = submission();
+    input.workflow = root.clone();
+    let key = Uuid::new_v4().to_string();
+    let job = app.submit(&key, input.clone(), "test").await?;
+    assert_eq!(job.snapshot.release_id, Some(first));
+    bundle.base_generation = 1;
+    w.version += 1;
+    w.description = "Updated release".into();
+    bundle
+        .workflows
+        .insert(root.clone(), serde_yaml::to_string(&w)?);
+    let second = releases::publish(
+        &app.store,
+        &app.platform,
+        &bundle,
+        "test",
+        "Changed description",
+    )
+    .await?;
+    let (a, b) = tokio::join!(
+        releases::activate(&app.store, &app.platform, second, 1, "test", "Concurrent A"),
+        releases::activate(&app.store, &app.platform, second, 1, "test", "Concurrent B")
+    );
+    assert_ne!(a.is_ok(), b.is_ok());
+    let same = app.submit(&key, input.clone(), "test").await?;
+    assert_eq!(same.id, job.id);
+    assert_eq!(same.snapshot.release_id, Some(first));
+    let new = app
+        .submit(&Uuid::new_v4().to_string(), input.clone(), "test")
+        .await?;
+    assert_eq!(new.snapshot.release_id, Some(second));
+    assert!(
+        releases::publish(&app.store, &app.platform, &bundle, "test", "Stale base")
+            .await
+            .is_err()
+    );
+    releases::activate(
+        &app.store,
+        &app.platform,
+        first,
+        2,
+        "test",
+        "Restore original",
+    )
+    .await?;
+    let restored = releases::active(&app.store, &app.platform, &root).await?;
+    assert_eq!(restored.release_id, Some(first));
+    assert_eq!(
+        app.store.job(new.id).await?.snapshot.release_id,
+        Some(second)
+    );
+    bundle.base_generation = 3;
+    w.description = "Illegal overwrite".into();
+    bundle
+        .workflows
+        .insert(root.clone(), serde_yaml::to_string(&w)?);
+    assert!(releases::publish(
+        &app.store,
+        &app.platform,
+        &bundle,
+        "test",
+        "Changed immutable version"
+    )
+    .await
+    .is_err());
+    let restored_store = Store::connect(&std::env::var("DATABASE_URL")?).await?;
+    releases::seed(&restored_store, &app.platform, &app.snapshot).await?;
+    assert_eq!(
+        releases::active(&restored_store, &app.platform, &root)
+            .await?
+            .release_id,
+        Some(first)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing at a disposable PostgreSQL database"]
+async fn configuration_authority_draft_conflicts_and_validation() -> Result<()> {
+    let mut app = fixture().await?;
+    let a = Arc::make_mut(&mut app);
+    a.identities.push(Identity {
+        token: "configuration-editor-credential".into(),
+        subject: "editor".into(),
+        roles: vec!["configuration_editor".into()],
+        repositories: vec![],
+    });
+    a.identities.push(Identity {
+        token: "configuration-publisher-credential".into(),
+        subject: "publisher".into(),
+        roles: vec!["configuration_publisher".into()],
+        repositories: vec![],
+    });
+    let router = api::router(app.clone(), "web");
+    let bundle = factories::releases::Bundle::from_snapshot(&app.snapshot, "demo")?;
+    let draft = Uuid::new_v4();
+    let request = |method: &str, path: String, token: &str, body: Value| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    for token in [
+        "integration-test-observer-credential",
+        "configuration-publisher-credential",
+    ] {
+        let r = router
+            .clone()
+            .oneshot(request(
+                "PUT",
+                format!("/api/configuration/drafts/{draft}"),
+                token,
+                json!({"revision":0,"bundle":bundle}),
+            ))
+            .await?;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+    for (revision, expected) in [
+        (0, StatusCode::OK),
+        (0, StatusCode::CONFLICT),
+        (1, StatusCode::OK),
+        (1, StatusCode::CONFLICT),
+    ] {
+        let r = router
+            .clone()
+            .oneshot(request(
+                "PUT",
+                format!("/api/configuration/drafts/{draft}"),
+                "configuration-editor-credential",
+                json!({"revision":revision,"bundle":bundle}),
+            ))
+            .await?;
+        assert_eq!(r.status(), expected);
+    }
+    let r = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/configuration/releases".into(),
+            "configuration-editor-credential",
+            json!({"bundle":bundle,"note":"Not authorized"}),
+        ))
+        .await?;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let mut invalid = factories::releases::Bundle::from_snapshot(&app.snapshot, "research-plan")?;
+    invalid.prompts.clear();
+    let r = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/configuration/validate".into(),
+            "configuration-editor-credential",
+            serde_json::to_value(invalid)?,
+        ))
+        .await?;
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing at a disposable PostgreSQL database"]
+async fn local_files_mode_uses_local_snapshot_and_disables_portal_mutations() -> Result<()> {
+    let mut app = fixture().await?;
+    let mutable = Arc::make_mut(&mut app);
+    mutable.local_configuration = true;
+    mutable.snapshot.workflows.get_mut("demo").unwrap().version = 999;
+    mutable.identities[0]
+        .roles
+        .push("configuration_editor".into());
+    let job = app
+        .submit(&Uuid::new_v4().to_string(), submission(), "test")
+        .await?;
+    assert_eq!(job.snapshot.workflows["demo"].version, 999);
+    assert!(job.snapshot.release_id.is_none());
+    assert_ne!(
+        factories::releases::active(&app.store, &app.platform, "demo")
+            .await?
+            .workflows["demo"]
+            .version,
+        999
+    );
+    let bundle = factories::releases::Bundle::from_snapshot(&app.snapshot, "demo")?;
+    let response = api::router(app, "web")
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/configuration/validate")
+                .header(
+                    "Authorization",
+                    "Bearer integration-test-operator-credential",
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&bundle)?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    Ok(())
+}
+
+async fn design_fixture(app: &App) -> Result<factories::releases::Bundle> {
+    let root = format!("design-{}", Uuid::new_v4().simple());
+    let mut bundle = factories::releases::Bundle::from_snapshot(&app.snapshot, "demo")?;
+    let mut w: factories::workflow::Workflow = serde_yaml::from_str(&bundle.workflows["demo"])?;
+    w.id = root.clone();
+    w.phases.truncate(1);
+    w.phases[0].gate = None;
+    let prompt = format!("{root}@1");
+    for t in &mut w.phases[0].tasks {
+        if t.with.contains_key("prompt") {
+            t.with.insert("prompt".into(), prompt.clone());
+        }
+    }
+    bundle.workflow = root.clone();
+    bundle.workflows.clear();
+    bundle.workflows.insert(root, serde_yaml::to_string(&w)?);
+    bundle.prompts.clear();
+    bundle
+        .prompts
+        .insert(prompt, "Original instructions".into());
+    let release =
+        factories::releases::publish(&app.store, &app.platform, &bundle, "test", "Design fixture")
+            .await?;
+    factories::releases::activate(
+        &app.store,
+        &app.platform,
+        release,
+        0,
+        "test",
+        "Design fixture",
+    )
+    .await?;
+    bundle.base_generation = 1;
+    Ok(bundle)
+}
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing at a disposable PostgreSQL database"]
+async fn design_prepares_versions_and_atomically_publishes_saved_candidate() -> Result<()> {
+    use factories::releases;
+    let app = fixture().await?;
+    let mut bundle = design_fixture(&app).await?;
+    let original_name = bundle.prompts.keys().next().unwrap().clone();
+    bundle
+        .prompts
+        .insert(original_name.clone(), "Revised instructions".into());
+    let prepared = releases::prepare(&app.store, &app.platform, bundle).await?;
+    let next = format!("{}@2", prepared.workflow);
+    assert_eq!(prepared.prompts[&next], "Revised instructions");
+    let w: factories::workflow::Workflow =
+        serde_yaml::from_str(&prepared.workflows[&prepared.workflow])?;
+    assert_eq!(w.version, 2);
+    assert!(w.phases[0]
+        .tasks
+        .iter()
+        .any(|t| t.with.get("prompt") == Some(&next)));
+    let again = releases::prepare(&app.store, &app.platform, prepared.clone()).await?;
+    assert_eq!(prepared.digest()?, again.digest()?);
+    let draft = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO configuration_drafts(id,revision,bundle,actor) VALUES($1,1,$2,'test')",
+    )
+    .bind(draft)
+    .bind(serde_json::to_value(&prepared)?)
+    .execute(&app.store.pool)
+    .await?;
+    let mut unsaved = prepared.clone();
+    unsaved.prompts.insert(next, "Unsaved edit".into());
+    assert!(releases::publish_with_options(
+        &app.store,
+        &app.platform,
+        &unsaved,
+        "test",
+        "Wrong candidate",
+        Some((draft, 1)),
+        true
+    )
+    .await
+    .is_err());
+    let release = releases::publish_with_options(
+        &app.store,
+        &app.platform,
+        &prepared,
+        "test",
+        "Reviewed candidate",
+        Some((draft, 1)),
+        true,
+    )
+    .await?;
+    assert_eq!(
+        releases::active(&app.store, &app.platform, &prepared.workflow)
+            .await?
+            .release_id,
+        Some(release)
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM configuration_drafts WHERE id=$1")
+        .bind(draft)
+        .fetch_one(&app.store.pool)
+        .await?;
+    assert_eq!(status, "published");
+    let number: i64 =
+        sqlx::query_scalar("SELECT release_number FROM workflow_releases WHERE id=$1")
+            .bind(release)
+            .fetch_one(&app.store.pool)
+            .await?;
+    assert_eq!(number, 2);
+    Ok(())
+}
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing at a disposable PostgreSQL database"]
+async fn prompt_adoption_creates_only_selected_drafts_and_tracks_test_candidate() -> Result<()> {
+    let mut app = fixture().await?;
+    let mutable = Arc::make_mut(&mut app);
+    mutable.identities[0].roles.extend([
+        "configuration_editor".into(),
+        "configuration_publisher".into(),
+    ]);
+    let original = design_fixture(&app).await?;
+    let router = api::router(app.clone(), "web");
+    let request = |path: &str, body: Value| {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(
+                "Authorization",
+                "Bearer integration-test-operator-credential",
+            )
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let input = json!({"name":original.workflow,"content":"Shared prompt update","note":"Test adoption","expected_name":format!("{}@1",original.workflow),"consumers":[{"workflow":original.workflow,"expected_generation":1}]});
+    let response = router
+        .clone()
+        .oneshot(request("/api/configuration/prompts/revise", input.clone()))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: Value = serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await?)?;
+    assert_eq!(result["name"], format!("{}@2", original.workflow));
+    let draft = result["drafts"][0]["id"].as_str().unwrap();
+    let value: Value = sqlx::query_scalar("SELECT bundle FROM configuration_drafts WHERE id=$1")
+        .bind(Uuid::parse_str(draft)?)
+        .fetch_one(&app.store.pool)
+        .await?;
+    let candidate: factories::releases::Bundle = serde_json::from_value(value)?;
+    assert!(candidate
+        .prompts
+        .values()
+        .any(|p| p == "Shared prompt update"));
+    let active = factories::releases::active(&app.store, &app.platform, &original.workflow).await?;
+    assert!(active
+        .prompts
+        .values()
+        .any(|p| p.text == "Original instructions"));
+    let stale = router
+        .clone()
+        .oneshot(request("/api/configuration/prompts/revise", input))
+        .await?;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let mut submission = submission();
+    submission.workflow = original.workflow.clone();
+    let test = router
+        .clone()
+        .oneshot(request(
+            &format!("/api/configuration/drafts/{draft}/test"),
+            json!({"revision":1,"submission":submission,"key":"test-1"}),
+        ))
+        .await?;
+    assert_eq!(test.status(), StatusCode::OK);
+    let test_result: Value = serde_json::from_slice(&to_bytes(test.into_body(), 100_000).await?)?;
+    let digest: String =
+        sqlx::query_scalar("SELECT candidate_digest FROM configuration_tests WHERE job_id=$1")
+            .bind(Uuid::parse_str(test_result["job_id"].as_str().unwrap())?)
+            .fetch_one(&app.store.pool)
+            .await?;
+    assert_eq!(digest, candidate.digest()?);
+    let discard = router
+        .clone()
+        .oneshot(request(
+            &format!("/api/configuration/drafts/{draft}/discard"),
+            json!({"revision":1}),
+        ))
+        .await?;
+    assert_eq!(discard.status(), StatusCode::OK);
+    let no_test = router
+        .clone()
+        .oneshot(request(
+            &format!("/api/configuration/drafts/{draft}/test"),
+            json!({"revision":1,"submission":submission,"key":"test-2"}),
+        ))
+        .await?;
+    assert_eq!(no_test.status(), StatusCode::CONFLICT);
     Ok(())
 }
