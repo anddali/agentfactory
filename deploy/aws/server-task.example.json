@@ -1,0 +1,39 @@
+{
+  "family": "factory-server",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT:role/factory-server-execution",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT:role/factory-control-plane",
+  "containerDefinitions": [{
+    "name": "server",
+    "image": "ACCOUNT.dkr.ecr.REGION.amazonaws.com/factory-server@sha256:IMAGE_DIGEST",
+    "essential": true,
+    "portMappings": [{"containerPort": 8080}],
+    "environment": [
+      {"name": "FACTORY_EXECUTOR", "value": "ecs"},
+      {"name": "FACTORY_PUBLIC_READ", "value": "false"},
+      {"name": "FACTORY_CONFIG", "value": "/app/config/production.yaml"},
+      {"name": "FACTORY_WORKFLOWS", "value": "/app/production-workflows"},
+      {"name": "FACTORY_ECS_CLUSTER", "value": "factory"},
+      {"name": "FACTORY_ECS_NETWORK", "value": "{\"awsvpcConfiguration\":{\"subnets\":[\"subnet-REPLACE\"],\"securityGroups\":[\"sg-REPLACE\"],\"assignPublicIp\":\"DISABLED\"}}"},
+      {"name": "FACTORY_WORKER_SERVER_URL", "value": "https://factory.internal.example.com"},
+      {"name": "FACTORY_PORTAL_URL", "value": "https://factory.example.com/"},
+      {"name": "FACTORY_S3_BUCKET", "value": "REPLACE-factory-artifacts"},
+      {"name": "FACTORY_ARTIFACT_ROOT", "value": "/tmp/factory-artifacts"},
+      {"name": "AWS_DEFAULT_REGION", "value": "REGION"}
+    ],
+    "secrets": [
+      {"name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:factory/database"},
+      {"name": "FACTORY_WORKER_SECRET", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:factory/worker-secret"},
+      {"name": "FACTORY_IDENTITIES", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:factory/identities"},
+      {"name": "EXAMPLE_REPO_READ_TOKEN", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:factory/repository-read"},
+      {"name": "EXAMPLE_REPO_WRITE_TOKEN", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:factory/repository-write"},
+      {"name": "CODING_AGENT_API_KEY", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:factory/agent-key"},
+      {"name": "FACTORY_SLACK_BOT_TOKEN", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:factory/slack-bot"},
+      {"name": "FACTORY_SLACK_SIGNING_SECRET", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:factory/slack-signing"}
+    ],
+    "logConfiguration": {"logDriver": "awslogs", "options": {"awslogs-group": "/factory/server", "awslogs-region": "REGION", "awslogs-stream-prefix": "control-plane"}}
+  }]
+}

@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Factories · Operations</title>
+    <link rel="stylesheet" href="/styles.css?v=connector-groups-6" />
+    <script defer src="/app.js?v=connector-groups-6"></script>
+  </head>
+  <body>
+    <div class="portal">
+      <aside class="sidebar">
+        <a class="brand" href="#overview"
+          ><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span
+          ><span>Factories<small>ENGINEERING OPERATIONS</small></span></a
+        >
+        <div class="workspace-label">
+          <span class="workspace-icon">F</span
+          ><span>Factory workspace<small>Control plane</small></span
+          ><span class="subtle">⌄</span>
+        </div>
+        <nav aria-label="Main navigation">
+          <div class="nav-caption">WORKSPACE</div>
+          <a href="#overview" data-nav="overview"
+            ><span aria-hidden="true">▦</span>Overview</a
+          ><a href="#floor" data-nav="floor"
+            ><span aria-hidden="true">▥</span>Factory floor<span
+              id="nav-active"
+              class="nav-count"
+              >—</span
+            ></a
+          ><a href="#lines" data-nav="lines"
+            ><span aria-hidden="true">⟐</span>Production lines</a
+          ><a href="#jobs" data-nav="jobs"
+            ><span aria-hidden="true">≡</span>Jobs & receipts</a
+          ><a href="#gates" data-nav="gates"
+            ><span aria-hidden="true">◇</span>Human gates<span
+              id="nav-gates"
+              class="nav-count amber"
+              >—</span
+            ></a
+          >
+          <div class="nav-caption">OBSERVABILITY</div>
+          <a href="#activity" data-nav="activity"
+            ><span aria-hidden="true">↗</span>Activity</a
+          ><a href="#connectors" data-nav="connectors"><span aria-hidden="true">⌁</span>Connectors</a><a href="#platform" data-nav="platform"
+            ><span aria-hidden="true">⌘</span>Platform</a
+          >
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="human-policy">
+            <span>◈</span>
+            <div>
+              Human-led. Agent-operated.<small
+                >Decisions stay in the conversation.</small
+              >
+            </div>
+          </div>
+          <button id="connection-button" class="account">
+            <span class="avatar">OP</span
+            ><span
+              >Workspace access<small id="access-label"
+                >Local workspace</small
+              ></span
+            ><span>⌁</span>
+          </button>
+        </div>
+      </aside>
+      <main>
+        <div class="utility">
+          <div>
+            <span class="subtle">Workspace</span><span class="slash">/</span
+            ><span id="breadcrumb">Overview</span>
+          </div>
+          <div class="utility-right">
+            <span class="connection" id="connection"><i></i>Connecting</span
+            ><time id="clock"></time
+            ><button
+              id="theme"
+              class="icon-button"
+              aria-label="Toggle color theme"
+            >
+              ◐
+            </button>
+          </div>
+        </div>
+        <header class="page-header">
+          <div>
+            <div class="eyebrow" id="page-eyebrow">
+              YOUR ENGINEERING WORKFORCE
+            </div>
+            <h1 id="page-title">Operations overview</h1>
+            <p id="page-description">
+              A clear view of the work, the workers, and what needs you.
+            </p>
+          </div>
+          <div class="header-actions">
+            <span class="readonly" id="access-mode">◉ READ-ONLY</span
+            ><button id="launch-button" class="primary" disabled>Run workflow</button><button id="refresh">↻ <span>Refresh</span></button>
+          </div>
+        </header>
+        <div id="error" role="status" hidden></div>
+        <div class="filters">
+          <label class="search"
+            ><span aria-hidden="true">⌕</span
+            ><input
+              id="search"
+              type="search"
+              placeholder="Search cases, jobs or repositories…"
+              aria-label="Search cases, jobs or repositories" /></label
+          ><select id="repository" aria-label="Filter repository">
+            <option value="">All repositories</option></select
+          ><select id="workflow" aria-label="Filter production line">
+            <option value="">All production lines</option></select
+          ><span id="scope-label" class="subtle"></span>
+        </div>
+        <section id="content" aria-live="polite">
+          <div class="empty-state">Connecting to the control plane…</div>
+        </section>
+        <footer>
+          <span
+            ><i class="small-dot"></i> Durable state · Disposable workers</span
+          ><span id="last-sync">Waiting for first sync</span>
+        </footer>
+      </main>
+    </div>
+    <dialog id="launch" aria-labelledby="launch-title">
+      <form id="launch-form">
+        <div class="dialog-head"><h2 id="launch-title">Run workflow</h2><button id="launch-close" type="button" aria-label="Close workflow form">×</button></div>
+        <div class="connector-body">
+          <p>Choose a workflow and enter a repository URL accessible to your connected provider credentials. Factory uses its default branch, or the PR head for a pull request.</p>
+          <label>Workflow<select id="launch-workflow" required></select></label>
+          <label>Repository URL or alias<input id="launch-repository" required maxlength="2048" placeholder="https://github.com/owner/repository"></label>
+          <label>Task source<select id="launch-provider"><option value="manual">Manual task</option><option value="jira">Jira issue</option><option value="github_pr">GitHub pull request</option><option value="ado_pr">Azure DevOps pull request</option></select></label>
+          <label>Issue key or PR number (optional for a manual task)<input id="launch-key" maxlength="120" autocomplete="off" aria-describedby="jira-search-status"></label>
+          <div id="jira-search" hidden><p id="jira-search-status" role="status"></p><div id="jira-results" class="jira-results" aria-label="Matching Jira issues"></div></div>
+          <label>Title<input id="launch-task-title" maxlength="500" required></label>
+          <label>Task details<textarea id="launch-body" rows="7" maxlength="100000"></textarea></label>
+          <p id="launch-error" class="notice" role="alert" hidden></p>
+          <button id="launch-submit" type="submit" class="primary">Run workflow</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="detail">
+      <div class="dialog-head">
+        <div>
+          <span class="eyebrow" id="detail-key"></span>
+          <h2 id="detail-title">Job details</h2>
+          <p id="detail-meta"></p>
+        </div>
+        <button id="close-detail" aria-label="Close job details">×</button>
+      </div>
+      <div id="case-history" class="case-history"></div>
+      <div class="tabs" role="tablist" aria-label="Job details">
+        <button role="tab" data-tab="timeline" aria-selected="true">
+          Timeline</button
+        ><button role="tab" data-tab="gates" aria-selected="false">Gates</button
+        ><button role="tab" data-tab="receipt" aria-selected="false">
+          Receipt
+        </button>
+      </div>
+      <div id="detail-body" class="detail-body" role="tabpanel"></div>
+    </dialog>
+    <dialog id="report" aria-labelledby="report-title">
+      <div class="dialog-head"><div><span class="eyebrow">PUBLISHED ARTIFACT</span><h2 id="report-title">Report</h2></div><button id="close-report" type="button" aria-label="Close report">×</button></div>
+      <div id="report-body" class="report-body"></div>
+    </dialog>
+    <dialog id="credentials">
+      <form id="credential-form">
+        <div class="dialog-head">
+          <div>
+            <span class="eyebrow">WORKSPACE ACCESS</span>
+            <h2>Connect to your workspace</h2>
+          </div>
+          <button
+            type="button"
+            id="close-credentials"
+            aria-label="Close connection settings"
+          >
+            ×
+          </button>
+        </div>
+        <div class="detail-body">
+          <p>
+            Enter a Factories API token. A repository maintainer with approval
+            access can approve or reject gates. The token stays in this browser
+            tab’s session. Use your local-maintainer token from
+            FACTORY_IDENTITIES in .env, not your OpenAI API key.
+          </p>
+          <label class="field"
+            >API token<input
+              id="api-token"
+              type="password"
+              autocomplete="off"
+              placeholder="Factories API token"
+          /></label>
+          <div class="actions">
+            <button type="button" id="clear-token">Clear token</button
+            ><button class="primary" type="submit">Connect</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="decision" aria-labelledby="decision-title">
+      <form id="decision-form">
+        <div class="dialog-head">
+          <h2 id="decision-title">Confirm decision</h2>
+          <button type="button" id="close-decision" aria-label="Close decision">
+            ×
+          </button>
+        </div>
+        <div class="detail-body">
+          <p id="decision-summary"></p>
+          <p id="decision-consequence"></p>
+          <p>Artifact set <code id="decision-digest"></code></p>
+          <label
+            ><input type="checkbox" id="decision-reviewed" required /> I have
+            reviewed the artifacts for this attempt.</label
+          >
+          <p id="decision-error" role="alert" hidden></p>
+          <div class="actions">
+            <button type="button" id="cancel-decision">Back to evidence</button
+            ><button class="primary" id="submit-decision" type="submit">
+              Confirm
+            </button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+    <div id="toast" role="status" hidden></div>
+    <dialog id="connector-editor" aria-labelledby="connector-title">
+      <form id="connector-form" class="connector-form">
+        <div class="dialog-head"><h2 id="connector-title">Connector</h2><button id="connector-close" type="button" aria-label="Close connector settings">×</button></div>
+        <div class="connector-body">
+          <label class="connector-check"><input type="checkbox" id="connector-enabled">Enable this connector</label>
+          <section class="connector-section">
+          <h3>Connection settings</h3>
+          <div id="connector-fields"></div>
+          <p>Leave credential fields blank to keep saved values. Test connection checks these settings with the provider without saving them.</p>
+          <button id="connector-test" type="button">Test connection</button>
+          <div id="connector-test-result" class="notice" role="status" aria-live="polite" hidden></div>
+          </section>
+          <p id="connector-error" class="notice" role="alert" hidden></p>
+          <section id="jira-field-editor" hidden>
+            <section class="connector-section">
+            <h3>Fields included in task details</h3>
+            <p>The Jira description comes first. These fields follow in the order shown; empty fields are skipped.</p>
+            <div class="jira-default-field"><strong>Description</strong><span>Always included first</span></div>
+            <div id="jira-field-rows"></div>
+            </section>
+            <section class="connector-section">
+            <h3>Add another field</h3>
+            <p>Load available Jira fields, then choose one to include.</p>
+            <button id="jira-load-fields" type="button">Load fields from Jira</button>
+            <label>Find a field<input id="jira-field-filter" placeholder="Search field name or ID"></label>
+            <label>Matching Jira fields<select id="jira-field-choice"></select></label>
+            <button id="jira-add-field" type="button">Include selected field</button>
+            </section>
+            <section class="connector-section">
+            <h3>Preview combined task details</h3>
+            <p>Choose a ticket to see exactly what the agent will receive with these settings.</p>
+            <label>Jira issue key<input id="jira-preview-key" placeholder="SCRUM-1" maxlength="120"></label>
+            <button id="jira-preview" type="button">Preview task details</button>
+            <p id="jira-field-message" role="status"></p>
+            <pre id="jira-field-preview" hidden style="white-space:pre-wrap;max-height:300px;overflow:auto"></pre>
+            </section>
+          </section>
+          <div class="connector-save-bar"><span>Save to apply changes to future runs.</span>
+          <button id="connector-save" class="primary" type="submit">Save connector</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>
+

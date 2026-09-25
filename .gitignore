@@ -1,0 +1,6 @@
+/target/
+/.env
+/data/
+/.factory/
+*.log
+

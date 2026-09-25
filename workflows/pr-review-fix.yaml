@@ -1,0 +1,32 @@
+apiVersion: factory/v1
+kind: Workflow
+id: pr-review-fix
+version: 1
+description: Apply review findings on the factory branch and queue a fresh review.
+inputs:
+  issue: {type: issue_ref}
+  repository: {type: repository_ref}
+defaults:
+  workerProfile: coding-standard
+  agentProfile: coding-default
+  repositoryRevision: pin_at_job_start
+phases:
+  - id: fix
+    timeout: 90m
+    maxAttempts: 2
+    permissions: [repository.read, repository.branch.write]
+    inputs:
+      review: parent.artifacts.review
+    tasks:
+      - uses: repository.checkout
+      - uses: agent.execute
+        with: {prompt: fix@1, output: fixes.md}
+      - uses: artifact.publish
+        with: {name: fixes, path: fixes.md}
+      - uses: validation.run
+        with: {profile: repository-tests}
+      - uses: repository.push_branch
+followUps:
+  - workflow: pr-review
+    when: always
+    maxDepth: 6

@@ -1,0 +1,32 @@
+# Copy and customize. Point FACTORY_WORKFLOWS at a directory containing only
+# research-plan.yaml, pr-review.yaml and pr-review-fix.yaml (exclude demo.yaml).
+policy_version: production-v1
+allow_fixture: false
+allowed_permissions: [repository.read, issue.read, repository.branch.write, pull_request.create]
+workers:
+  coding-standard:
+    version: 1
+    image: ACCOUNT.dkr.ecr.REGION.amazonaws.com/factory-worker@sha256:REPLACE_WITH_IMAGE_DIGEST
+    ecs_task_definition: arn:aws:ecs:REGION:ACCOUNT:task-definition/factory-worker:1
+    cpus: "2"
+    memory: 4g
+agents:
+  coding-default:
+    version: 1
+    backend: openhands
+    env_keys: [LLM_API_KEY]
+    openhands:
+      sdk_version: 1.49.2
+      model: anthropic/REPLACE_WITH_MODEL_ID
+      api_key_env: LLM_API_KEY
+      base_url: null
+      max_iterations: 40
+      max_output_tokens: 8192
+      timeout_seconds: 1200
+      tools: [terminal, file_editor]
+validations:
+  repository-tests: [npm, test]
+# Configure provider credentials in the portal and submit repository URLs.
+# Optional aliases may supply branch/workflow/maintainer overrides.
+default_workflow: research-plan
+repositories: {}

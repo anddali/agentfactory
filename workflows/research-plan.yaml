@@ -1,0 +1,61 @@
+apiVersion: factory/v1
+kind: Workflow
+id: research-plan
+version: 1
+description: Research an issue, approve a plan, implement and validate the change, then open a pull request.
+inputs:
+  issue: {type: issue_ref}
+  repository: {type: repository_ref}
+defaults:
+  workerProfile: coding-standard
+  agentProfile: coding-default
+  repositoryRevision: pin_at_job_start
+phases:
+  - id: research
+    timeout: 60m
+    maxAttempts: 2
+    permissions: [repository.read, issue.read]
+    tasks:
+      - uses: repository.checkout
+      - uses: issue.fetch
+      - uses: agent.execute
+        with: {prompt: research@3, output: research.md}
+      - uses: artifact.publish
+        with: {name: research, path: research.md}
+    gate:
+      channels: [slack, api]
+      approvers: repository_maintainers
+      timeout: 72h
+      onReject: stop
+  - id: plan
+    timeout: 60m
+    maxAttempts: 2
+    permissions: [repository.read]
+    inputs:
+      research: phases.research.artifacts.research
+    tasks:
+      - uses: repository.checkout
+      - uses: agent.execute
+        with: {prompt: plan@2, output: plan.md}
+      - uses: artifact.publish
+        with: {name: plan, path: plan.md}
+    gate:
+      channels: [slack, api]
+      approvers: repository_maintainers
+      timeout: 72h
+      onReject: stop
+  - id: implement
+    timeout: 250m
+    maxAttempts: 2
+    permissions: [repository.read, repository.branch.write, pull_request.create]
+    inputs:
+      research: phases.research.artifacts.research
+      plan: phases.plan.artifacts.plan
+    tasks:
+      - uses: repository.checkout
+      - uses: agent.execute
+        with: {prompt: implement@4, output: implementation.md}
+      - uses: artifact.publish
+        with: {name: implementation, path: implementation.md}
+      - uses: repository.push_branch
+      - uses: pull_request.open

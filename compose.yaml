@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: factory
+      POSTGRES_USER: factory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run scripts/setup.ps1 or create .env}
+    ports: ["127.0.0.1:54329:5432"]
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U factory"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [control]
+  worker-image:
+    image: factory-worker:local
+    build: {context: ., target: worker}
+    profiles: [build]
+  server:
+    build: {context: ., target: server}
+    ports: ["127.0.0.1:${FACTORY_PORT:-8787}:8080"]
+    environment:
+      DATABASE_URL: postgres://factory:${POSTGRES_PASSWORD}@db:5432/factory
+      FACTORY_WORKER_SECRET: ${FACTORY_WORKER_SECRET:?Run scripts/setup.ps1}
+      FACTORY_IDENTITIES: ${FACTORY_IDENTITIES:?Run scripts/setup.ps1}
+      FACTORY_PUBLIC_READ: "true"
+      FACTORY_ARTIFACT_ROOT: /data/artifacts
+      FACTORY_DOCKER_NETWORK: factory_workers
+      FACTORY_WORKER_SERVER_URL: http://server:8080
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: ${OTEL_EXPORTER_OTLP_TRACES_HEADERS:-}
+    depends_on:
+      db: {condition: service_healthy}
+    volumes:
+      - artifacts:/data/artifacts
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [control, workers]
+    restart: unless-stopped
+  openhands-image:
+    image: factory-worker:openhands
+    build: {context: ., target: openhands-worker}
+    profiles: [openhands]
+volumes:
+  postgres:
+  artifacts:
+networks:
+  control:
+  workers:
+    name: factory_workers

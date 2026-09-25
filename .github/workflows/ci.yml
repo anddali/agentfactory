@@ -1,0 +1,30 @@
+name: Rust and PostgreSQL checks
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: factory
+          POSTGRES_PASSWORD: factory_ci_only
+          POSTGRES_DB: factory_test
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U factory" --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgres://factory:factory_ci_only@localhost:5432/factory_test
+      FACTORY_BUILD_REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo test --locked --test database -- --ignored
+      - run: node --check web/app.js
+      - run: node --test tests/portal-decisions.cjs
+      - run: docker build --target openhands-worker -t factory-worker:openhands .
+      - run: docker run --rm --read-only --tmpfs /work:rw,uid=10001,gid=10001 --tmpfs /tmp -v "${{ github.workspace }}/harnesses/openhands:/tests:ro" --entrypoint python factory-worker:openhands /tests/test_adapter.py

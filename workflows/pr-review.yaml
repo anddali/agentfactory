@@ -1,0 +1,27 @@
+apiVersion: factory/v1
+kind: Workflow
+id: pr-review
+version: 1
+description: Review a pinned repository revision and preserve a findings report.
+inputs:
+  issue: {type: issue_ref}
+  repository: {type: repository_ref}
+defaults:
+  workerProfile: coding-standard
+  agentProfile: coding-default
+  repositoryRevision: pin_at_job_start
+phases:
+  - id: review
+    timeout: 90m
+    maxAttempts: 2
+    permissions: [repository.read]
+    tasks:
+      - uses: repository.checkout
+      - uses: agent.execute
+        with: {prompt: review@1, output: review.md}
+      - uses: artifact.publish
+        with: {name: review, path: review.md}
+followUps:
+  - workflow: pr-review-fix
+    when: findings
+    maxDepth: 5

@@ -1,0 +1,54 @@
+apiVersion: factory/v1
+kind: Workflow
+id: demo
+version: 1
+description: Local acceptance workflow. Fixture agent output; real durable scheduling, workers, gates, and artifacts.
+inputs:
+  issue: {type: issue_ref}
+  repository: {type: repository_ref}
+defaults:
+  workerProfile: fixture-standard
+  agentProfile: fixture
+  repositoryRevision: pin_at_job_start
+phases:
+  - id: research
+    timeout: 2m
+    maxAttempts: 2
+    permissions: []
+    tasks:
+      - uses: agent.execute
+        with: {prompt: research@3, output: research.md}
+      - uses: artifact.publish
+        with: {name: research, path: research.md}
+    gate:
+      channels: [api]
+      approvers: repository_maintainers
+      timeout: 72h
+      onReject: stop
+  - id: plan
+    timeout: 2m
+    maxAttempts: 2
+    permissions: []
+    inputs:
+      research: phases.research.artifacts.research
+    tasks:
+      - uses: agent.execute
+        with: {prompt: plan@2, output: plan.md}
+      - uses: artifact.publish
+        with: {name: plan, path: plan.md}
+    gate:
+      channels: [api]
+      approvers: repository_maintainers
+      timeout: 72h
+      onReject: stop
+  - id: implement
+    timeout: 2m
+    permissions: []
+    inputs:
+      research: phases.research.artifacts.research
+      plan: phases.plan.artifacts.plan
+    tasks:
+      - uses: agent.execute
+        with: {prompt: implement@4, output: delivery.md}
+      - uses: artifact.publish
+        with: {name: delivery, path: delivery.md}

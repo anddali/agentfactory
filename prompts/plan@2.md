@@ -1,0 +1,1 @@
+Create an implementation plan from the approved research and pinned repository. Describe changes, affected files, validation, and rollback considerations. Flag conflicts with the research rather than silently changing scope. Write the requested Markdown output. Do not implement or publish repository changes.

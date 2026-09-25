@@ -1,0 +1,48 @@
+# Local development profile. Set allow_fixture: false for a real deployment.
+policy_version: local-v1
+allow_fixture: true
+allowed_permissions:
+  - repository.read
+  - issue.read
+  - repository.branch.write
+  - pull_request.create
+workers:
+  coding-standard:
+    version: 2
+    image: factory-worker:openhands
+    cpus: "2"
+    memory: 4g
+  fixture-standard:
+    version: 1
+    image: factory-worker:local
+    cpus: "1"
+    memory: 1g
+agents:
+  coding-default:
+    version: 1
+    backend: openhands
+    env_keys: [LLM_API_KEY]
+    openhands:
+      sdk_version: 1.49.2
+      model: openai/gpt-5.6-luna
+      api_key_env: LLM_API_KEY
+      base_url: null
+      api_mode: auto
+      max_iterations: 40
+      max_output_tokens: 16000
+      timeout_seconds: 1200
+      tools: [terminal, file_editor]
+  fixture:
+    version: 1
+    backend: fixture
+validations:
+  repository-tests: ["npm", "test", "--", "--runInBand"]
+repositories:
+  local-demo:
+    provider: fixture
+    url: fixture://local-demo
+    api_url: fixture://local-demo
+    branch: main
+    revision: "0000000000000000000000000000000000000000"
+    workflow: demo
+    maintainers: [local-maintainer]

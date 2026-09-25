@@ -1,0 +1,19 @@
+{
+  "family": "factory-worker",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "2048",
+  "memory": "4096",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT:role/factory-worker-execution",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT:role/factory-worker-no-platform-access",
+  "containerDefinitions": [{
+    "name": "worker",
+    "image": "ACCOUNT.dkr.ecr.REGION.amazonaws.com/factory-worker@sha256:IMAGE_DIGEST",
+    "essential": true,
+    "user": "10001:10001",
+    "environment": [{"name": "TMPDIR", "value": "/work"}],
+    "logConfiguration": {"logDriver": "awslogs", "options": {"awslogs-group": "/factory/workers", "awslogs-region": "REGION", "awslogs-stream-prefix": "phase"}},
+    "linuxParameters": {"capabilities": {"drop": ["ALL"]}}
+  }],
+  "ephemeralStorage": {"sizeInGiB": 30}
+}
