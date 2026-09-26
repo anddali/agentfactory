@@ -20,6 +20,7 @@ fn github_pr_accepts_web_urls_without_weakening_repository_authority() {
         "https://github.com/example/repo/",
         "https://github.com/example/repo.git",
         "https://github.com/example/repo.git/",
+        "https://GitHub.com/Example/Repo",
     ] {
         assert!(pull_request_context("github", url, &value).is_ok(), "{url}");
     }
@@ -28,6 +29,9 @@ fn github_pr_accepts_web_urls_without_weakening_repository_authority() {
         "https://github.com/example/repo-other",
         "https://other.example/example/repo",
         "https://github.com/example/repo?extra=1",
+        "https://github.com/example/repo#fragment",
+        "https://token@github.com/example/repo",
+        "https://github.com/example%2frepo",
     ] {
         assert!(
             pull_request_context("github", url, &value).is_err(),

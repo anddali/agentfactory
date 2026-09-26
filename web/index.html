@@ -116,14 +116,21 @@
       <form id="launch-form">
         <div class="dialog-head"><h2 id="launch-title">Run workflow</h2><button id="launch-close" type="button" aria-label="Close workflow form">×</button></div>
         <div class="connector-body">
-          <p>Choose a workflow and enter a repository URL accessible to your connected provider credentials. Factory uses its default branch, or the PR head for a pull request.</p>
+          <p>Choose a workflow. For a PR review, paste its link; Factory fetches the description, changes and discussion. You can also link a ticket.</p>
           <label>Workflow<select id="launch-workflow" required></select></label>
+          <div id="launch-review-fields" hidden>
+            <label>Pull request URL<input id="launch-pr-url" type="url" maxlength="2048" placeholder="https://github.com/owner/repository/pull/123"></label>
+            <label>Linked ticket (optional)<input id="launch-ticket" maxlength="2048" placeholder="Jira key or link, GitHub issue link, Azure work item link"></label>
+            <p class="subtle">Reviews publish findings to the PR. Actionable findings can trigger the configured fix and review cycle.</p>
+          </div>
+          <div id="launch-task-fields">
           <label>Repository URL or alias<input id="launch-repository" required maxlength="2048" placeholder="https://github.com/owner/repository"></label>
           <label>Task source<select id="launch-provider"><option value="manual">Manual task</option><option value="jira">Jira issue</option><option value="github_pr">GitHub pull request</option><option value="ado_pr">Azure DevOps pull request</option></select></label>
           <label>Issue key or PR number (optional for a manual task)<input id="launch-key" maxlength="120" autocomplete="off" aria-describedby="jira-search-status"></label>
           <div id="jira-search" hidden><p id="jira-search-status" role="status"></p><div id="jira-results" class="jira-results" aria-label="Matching Jira issues"></div></div>
           <label>Title<input id="launch-task-title" maxlength="500" required></label>
           <label>Task details<textarea id="launch-body" rows="7" maxlength="100000"></textarea></label>
+          </div>
           <p id="launch-error" class="notice" role="alert" hidden></p>
           <button id="launch-submit" type="submit" class="primary">Run workflow</button>
         </div>

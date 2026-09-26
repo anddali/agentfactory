@@ -243,9 +243,36 @@ impl App {
                     request.bearer_auth(credential)
                 };
             }
-            let response: Value = request.send().await?.error_for_status()?.json().await?;
+            let response = crate::pull_requests::read_json(request).await?;
             let context =
                 crate::providers::pull_request_context(&repo.provider, &repo.url, &response)?;
+            let ticket = match input
+                .issue
+                .ticket
+                .as_ref()
+                .and_then(|v| v["reference"].as_str())
+            {
+                Some(reference) => {
+                    Some(crate::pull_requests::ticket(self, reference, &input.repository).await?)
+                }
+                None => None,
+            };
+            let pr_url = format!(
+                "{}/{}/{number}",
+                repo.url.trim_end_matches('/').trim_end_matches(".git"),
+                if repo.provider == "github" {
+                    "pull"
+                } else {
+                    "pullrequest"
+                }
+            );
+            input.issue = crate::pull_requests::metadata_issue(
+                &repo.provider,
+                &number.to_string(),
+                &pr_url,
+                &response,
+                ticket,
+            )?;
             work_branch = context.1;
             base_branch = context.2;
             context.0
@@ -353,6 +380,7 @@ pub fn router(app: Arc<App>, web: &str) -> Router {
         .route("/api/connectors/jira/preview/{key}", post(jira_preview))
         .route("/api/jira/issues/{key}", get(jira_details))
         .route("/api/jobs", get(jobs).post(submit))
+        .route("/api/pr-reviews", post(submit_review))
         .route("/api/jobs/{id}", get(job))
         .route("/api/jobs/{id}/receipt", get(receipt))
         .route("/api/jobs/{id}/cancel", post(cancel))
@@ -604,6 +632,57 @@ async fn jira_search(
     Ok(Json(json!({"issues":issues})))
 }
 
+async fn submit_review(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(input): Json<crate::pull_requests::ReviewSubmission>,
+) -> Api<Json<Value>> {
+    let identity = app.identity(&headers)?;
+    let (repository, provider, number) = crate::pull_requests::parse_link(&input.pr_url)?;
+    let repository = app
+        .platform
+        .repositories
+        .iter()
+        .find(|(id, config)| {
+            identity.access(id, "operator")
+                && config.provider == provider.trim_end_matches("_pr")
+                && if config.provider == "github" {
+                    crate::providers::github_repository_url(&config.url).is_some_and(|url| {
+                        Some(url) == crate::providers::github_repository_url(&repository)
+                    })
+                } else {
+                    config.url.trim_end_matches('/') == repository.trim_end_matches('/')
+                }
+        })
+        .map(|(id, _)| id.clone())
+        .unwrap_or(repository);
+    ensure!(
+        identity.access(&repository, "operator"),
+        "forbidden: repository operator access required"
+    );
+    let submission = Submission {
+        workflow: input.workflow,
+        repository,
+        issue: Issue {
+            provider,
+            key: number,
+            title: String::new(),
+            body: String::new(),
+            url: Some(input.pr_url),
+            ticket: input
+                .ticket
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| json!({"reference":s.trim()})),
+        },
+    };
+    let key = headers
+        .get("Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .context("Idempotency-Key required")?;
+    Ok(Json(summary(
+        &app.submit(key, submission, &identity.subject).await?,
+    )))
+}
 async fn submit(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -750,9 +829,9 @@ async fn claim(
         .await?;
     let mut manifest = manifest(&job)?;
     let permissions = &job.phase().permissions;
-    let write = permissions
-        .iter()
-        .any(|p| p == "repository.branch.write" || p == "pull_request.create");
+    let write = permissions.iter().any(|p| {
+        p == "repository.branch.write" || p == "pull_request.create" || p == "pull_request.comment"
+    });
     if write || permissions.iter().any(|p| p == "repository.read") {
         // Check the pinned destination too before issuing a credential to a worker.
         let pinned = crate::repositories::pinned(&app.platform, &job.repository);
@@ -941,6 +1020,7 @@ async fn github(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) ->
         workflow,
         repository,
         issue: Issue {
+            ticket: None,
             provider: "github".into(),
             key: number.to_string(),
             title: payload["issue"]["title"].as_str().unwrap_or("").into(),
@@ -1012,6 +1092,7 @@ async fn jira(
         workflow,
         repository: payload.repository,
         issue: Issue {
+            ticket: None,
             provider: "jira".into(),
             key: payload.issue.key,
             title: payload.issue.fields.summary,

@@ -131,6 +131,28 @@ function launchSetup() {
   element('launch-workflow').value='review';element('launch-repository').value='https://github.com/team/new';element('launch-provider').value='manual';element('launch-task-title').value='Review this';
   return {s,element,requests,opened};
 }
+test('PR review needs only its URL and optional ticket, and preserves retry identity',async()=>{
+  const {s,element,requests}=launchSetup();
+  s.state.catalog.workflows['pr-review']={id:'pr-review',phases:[{inputs:{},tasks:[{uses:'pull_request.fetch'}]}]};
+  element('launch-workflow').value='pr-review';
+  element('launch-repository').value=''; element('launch-task-title').value='';
+  element('launch-pr-url').value='https://github.com/o/r/pull/1';
+  element('launch-ticket').value='TEAM-12';
+  s.setLaunchMode();
+  assert.equal(element('launch-task-fields').hidden,true);
+  assert.equal(element('launch-task-title').required,false);
+  assert.equal(element('launch-pr-url').required,true);
+  assert.equal(element('launch-task-title').disabled,true);
+  s.fetch=async(url,options)=>{requests.push({url,...options});throw Error('Connection lost')};
+  for(let i=0;i<2;i++)await element('launch-form').onsubmit({preventDefault(){}});
+  assert.equal(requests[0].url,'/api/pr-reviews');
+  assert.deepEqual(JSON.parse(requests[0].body),{workflow:'pr-review',pr_url:'https://github.com/o/r/pull/1',ticket:'TEAM-12'});
+  assert.equal(requests[0].headers['Idempotency-Key'],requests[1].headers['Idempotency-Key']);
+  element('launch-workflow').value='review';s.setLaunchMode();
+  assert.equal(element('launch-task-fields').hidden,false);
+  assert.equal(element('launch-task-title').required,true);
+  assert.equal(element('launch-pr-url').disabled,true);
+});
 test('portal launch excludes followups and opens submitted job using operator credentials',async()=>{
   const {s,element,requests,opened}=launchSetup();
   s.openLaunch();

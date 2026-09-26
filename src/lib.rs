@@ -6,6 +6,7 @@ pub mod execution;
 pub mod jira;
 pub mod model;
 pub mod providers;
+pub mod pull_requests;
 pub mod releases;
 pub mod repositories;
 pub mod storage;

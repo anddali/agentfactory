@@ -1,8 +1,8 @@
 apiVersion: factory/v1
 kind: Workflow
 id: pr-review
-version: 1
-description: Review a pinned repository revision and preserve a findings report.
+version: 3
+description: Review the entire PR with its discussion and optional ticket, then publish findings to the PR.
 inputs:
   issue: {type: issue_ref}
   repository: {type: repository_ref}
@@ -14,13 +14,22 @@ phases:
   - id: review
     timeout: 90m
     maxAttempts: 2
-    permissions: [repository.read]
+    permissions: [repository.read, pull_request.comment]
     tasks:
       - uses: repository.checkout
+      - uses: pull_request.fetch
+      - uses: artifact.publish
+        with: {name: pr-context, path: .factory-pr-context.json}
+      - uses: artifact.publish
+        with: {name: pr-diff, path: .factory-pr.diff}
       - uses: agent.execute
-        with: {prompt: review@1, output: review.md}
+        with: {prompt: review@3, output: review.md}
       - uses: artifact.publish
         with: {name: review, path: review.md}
+      - uses: artifact.publish
+        with: {name: findings, path: review.json}
+      - uses: pull_request.publish_review
+        with: {path: review.md}
 followUps:
   - workflow: pr-review-fix
     when: findings

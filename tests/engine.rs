@@ -70,6 +70,7 @@ fn job() -> Job {
             api_url: "fixture://local-demo".into(),
         },
         issue: Issue {
+            ticket: None,
             provider: "fixture".into(),
             key: "TEST-1".into(),
             title: "test".into(),
@@ -525,17 +526,19 @@ fn followups_preserve_case_and_pass_parent_artifacts_with_bounded_depth() {
     let instance = Uuid::new_v4();
     j.claim(a, instance, Utc::now(), &mut Changes::default())
         .unwrap();
-    j.current_mut().artifacts.insert(
-        "review".into(),
-        Artifact {
-            id: Uuid::new_v4(),
-            attempt_id: a,
-            name: "review".into(),
-            sha256: hash("findings"),
-            size: 8,
-            created_at: Utc::now(),
-        },
-    );
+    for name in ["review", "findings", "pr-context", "pr-diff"] {
+        j.current_mut().artifacts.insert(
+            name.into(),
+            Artifact {
+                id: Uuid::new_v4(),
+                attempt_id: a,
+                name: name.into(),
+                sha256: hash("findings"),
+                size: 8,
+                created_at: Utc::now(),
+            },
+        );
+    }
     let result = Completion {
         agent_runs: vec![],
         succeeded: true,

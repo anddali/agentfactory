@@ -62,6 +62,31 @@ async fn fixture() -> Result<Arc<App>> {
 
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing at a disposable PostgreSQL database"]
+async fn pr_link_submission_authorizes_derived_repository_before_provider_access() -> Result<()> {
+    let app = fixture().await?;
+    let router = api::router(app, "web");
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/pr-reviews")
+                .header(
+                    "Authorization",
+                    "Bearer integration-test-operator-credential",
+                )
+                .header("Content-Type", "application/json")
+                .header("Idempotency-Key", Uuid::new_v4().to_string())
+                .body(Body::from(
+                    json!({"pr_url":"https://github.com/outside/scope/pull/12"}).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing at a disposable PostgreSQL database"]
 async fn attention_dismissal_requires_operator_and_survives_reload() -> Result<()> {
     let app = fixture().await?;
     let job = app
@@ -129,6 +154,7 @@ fn submission() -> Submission {
         workflow: "demo".into(),
         repository: "local-demo".into(),
         issue: Issue {
+            ticket: None,
             provider: "fixture".into(),
             key: Uuid::new_v4().to_string(),
             title: "Integration test".into(),
