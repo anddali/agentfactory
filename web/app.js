@@ -9,6 +9,8 @@ const escapeHTML = (value) =>
       ],
   );
 const names = {
+  workflows: ["Workflows", "Design how work moves from an issue to a reviewed result."],
+  prompts: ["Prompts", "Shape agent instructions and choose where changes are adopted."],
   connectors: ["Connectors", "Manage service connections and credentials for your repositories."],
   overview: [
     "Operations overview",
@@ -67,6 +69,7 @@ function setHTML(element, html) {
 }
 function resetAccess() {
   accessVersion++;
+  if (typeof resetConfiguration === "function") resetConfiguration();
   clearJiraSearch();
   if ($("launch").open) $("launch").close();
   pendingLaunch = null;
@@ -110,7 +113,8 @@ const empty = (title, body = "") =>
 const jobButton = (job, text) =>
   `<button data-job="${escapeHTML(job.id)}">${escapeHTML(text || job.issue.key)}</button>`;
 function page() {
-  const p = location.hash.slice(1);
+  const raw = location.hash.slice(1).split("/")[0];
+  const p = ["configuration", "lines"].includes(raw) ? "workflows" : raw;
   return Object.hasOwn(names, p) ? p : "overview";
 }
 function reportLink(jobId, artifactId) {
@@ -219,6 +223,9 @@ async function api(path) {
 }
 function route() {
   const current = page();
+  const design = ["workflows", "prompts"].includes(current);
+  document.querySelector(".filters").hidden = design;
+  $("launch-button").hidden = design;
   $("page-title").textContent = names[current][0];
   $("breadcrumb").textContent =
     current === "floor" ? "Factory floor" : names[current][0];
@@ -270,7 +277,7 @@ function overview(jobs, events) {
     )
     .join(
       "",
-    )}</div><div class="panel-note">Each case keeps its identity across retries and follow-up jobs. Approvals refer to a specific artifact version.</div></div><div class="panel"><div class="panel-head"><h2>Latest activity</h2><a href="#activity">View all →</a></div>${milestones(events, 3)}</div></div><div class="section-heading"><h2>Production lines</h2><a href="#lines">Explore workflows →</a></div><div class="line-grid">${Object.values(
+    )}</div><div class="panel-note">Each case keeps its identity across retries and follow-up jobs. Approvals refer to a specific artifact version.</div></div><div class="panel"><div class="panel-head"><h2>Latest activity</h2><a href="#activity">View all →</a></div>${milestones(events, 3)}</div></div><div class="section-heading"><h2>Production lines</h2><a href="#workflows">Explore workflows →</a></div><div class="line-grid">${Object.values(
     state.catalog.workflows,
   )
     .filter((w) => !$("workflow").value || w.id === $("workflow").value)
@@ -532,7 +539,7 @@ async function searchJira(query, version, authVersion) {
 }
 function queueJiraSearch() {
   clearJiraSearch();
-  if ($("launch-provider").value !== "jira" || launchBusy) return;
+  if ($("launch-provider").disabled || $("launch-provider").value !== "jira" || launchBusy) return;
   $("jira-search").hidden = false;
   const query = $("launch-key").value.trim();
   if ([...query].length < 2) {
@@ -585,12 +592,28 @@ $("jira-results").onclick = async event => {
 function launchable(workflow) {
   return !workflow.phases.some(p => Object.values(p.inputs || {}).some(v => v.startsWith("parent.")));
 }
+function isPrReview(workflow) {
+  return workflow?.id === "pr-review" || workflow?.phases?.some(p => p.tasks?.some(t => t.uses === "pull_request.fetch"));
+}
+function setLaunchMode() {
+  const review = isPrReview(state.catalog.workflows[$("launch-workflow").value]);
+  $("launch-review-fields").hidden = !review;
+  $("launch-task-fields").hidden = review;
+  $("launch-pr-url").required = review;
+  $("launch-repository").required = !review;
+  $("launch-task-title").required = !review;
+  ["launch-pr-url", "launch-ticket"].forEach(id => $(id).disabled = !review);
+  ["launch-repository", "launch-provider", "launch-key", "launch-task-title", "launch-body"].forEach(id => $(id).disabled = review);
+  if (review) $("jira-search").hidden = true;
+}
+$("launch-workflow").addEventListener("change", setLaunchMode);
 function openLaunch() {
   if (!(access.operable_repositories || []).length || !state.catalog || launchBusy) return;
   const workflows = Object.values(state.catalog.workflows).filter(launchable);
   $("launch-workflow").innerHTML = workflows.map(w => `<option value="${escapeHTML(w.id)}">${escapeHTML(w.id)}</option>`).join("");
   $("launch-submit").disabled = !workflows.length;
   $("launch-error").hidden = true;
+  setLaunchMode();
   $("launch").showModal();
   queueJiraSearch();
 }
@@ -606,25 +629,28 @@ $("launch-form").onsubmit = async e => {
   const provider = $("launch-provider").value;
   const key = $("launch-key").value.trim();
   const title = $("launch-task-title").value.trim();
+  const review = isPrReview(state.catalog.workflows[workflow]);
   $("launch-error").hidden = true;
   const controls = [...$("launch-form").querySelectorAll("input, select, textarea, button")];
   try {
-    if (!repository || !title || !state.catalog.workflows[workflow] || !launchable(state.catalog.workflows[workflow])) throw Error("Choose a workflow, repository, and task title.");
-    if (provider !== "manual" && !key) throw Error("Enter the issue key or PR number.");
-    if (provider.endsWith("_pr") && !/^[1-9][0-9]*$/.test(key)) throw Error("PR number must be a positive integer.");
+    if (!state.catalog.workflows[workflow] || !launchable(state.catalog.workflows[workflow])) throw Error("Choose a launchable workflow.");
+    if (!review && (!repository || !title)) throw Error("Choose a workflow, repository, and task title.");
+    if (!review && provider !== "manual" && !key) throw Error("Enter the issue key or PR number.");
+    if (!review && provider.endsWith("_pr") && !/^[1-9][0-9]*$/.test(key)) throw Error("PR number must be a positive integer.");
+    if (review && !$("launch-pr-url").value.trim()) throw Error("Enter the pull request URL.");
     const scopes = access.operable_repositories;
-    if (!scopes.includes("*") && !scopes.includes(repository)) throw Error("Your workspace token does not have operator access to this repository.");
-    const draft = JSON.stringify({workflow, repository, issue:{provider, key, title, body:$("launch-body").value, url:null}});
+    if (!review && !scopes.includes("*") && !scopes.includes(repository)) throw Error("Your workspace token does not have operator access to this repository.");
+    const draft = JSON.stringify(review ? {workflow, pr_url:$("launch-pr-url").value.trim(), ticket:$("launch-ticket").value.trim() || null} : {workflow, repository, issue:{provider, key, title, body:$("launch-body").value, url:null}});
     // Keep the exact payload and idempotency key after an uncertain response.
     if (!pendingLaunch || pendingLaunch.draft !== draft || pendingLaunch.version !== version) {
       const payload = JSON.parse(draft);
       const id = crypto.randomUUID();
-      if (!payload.issue.key) payload.issue.key = `manual-${id}`;
+      if (payload.issue && !payload.issue.key) payload.issue.key = `manual-${id}`;
       pendingLaunch = {draft, version, id, body:JSON.stringify(payload)};
     }
     launchBusy = true;
     controls.forEach(el => el.disabled = true);
-    const response = await fetch("/api/jobs", {method:"POST", headers:{"Content-Type":"application/json", Authorization:`Bearer ${sessionStorage.getItem("factory-observer-token") || ""}`, "Idempotency-Key":pendingLaunch.id}, body:pendingLaunch.body});
+    const response = await fetch(review ? "/api/pr-reviews" : "/api/jobs", {method:"POST", headers:{"Content-Type":"application/json", Authorization:`Bearer ${sessionStorage.getItem("factory-observer-token") || ""}`, "Idempotency-Key":pendingLaunch.id}, body:pendingLaunch.body});
     const result = await response.json();
     if (!response.ok) throw Error(result.error || "Workflow submission failed");
     if (version !== accessVersion) return;
@@ -643,6 +669,7 @@ $("launch-form").onsubmit = async e => {
   } finally {
     launchBusy = false;
     controls.forEach(el => el.disabled = false);
+    setLaunchMode();
   }
 };
 
@@ -661,13 +688,17 @@ function render() {
     overview: () => overview(jobs, events),
     floor: () => floor(jobs, events),
     lines,
+    workflows: configurationView,
+    prompts: configurationView,
     jobs: () => jobTable(jobs),
     gates: () => gates(jobs),
     activity: () => `<div class="panel">${milestones(events, 100)}</div>`,
     platform,
     connectors,
+
   };
-  setHTML($("content"), views[p]());
+  if (["workflows", "prompts"].includes(p) && typeof renderDesign === "function") renderDesign();
+  else setHTML($("content"), views[p]());
 }
 async function refresh() {
   if (busy) {
@@ -689,6 +720,8 @@ async function refresh() {
     const connections = permissions.manage_connectors ? (await api("/api/connectors")).connectors : [];
     if (version !== accessVersion) return;
     connectorCatalog = connections;
+    if (typeof loadConfiguration === "function") await loadConfiguration();
+    if (version !== accessVersion) return;
     state = { catalog, jobs: jobs.jobs, events: events.events, loaded: true };
     for (const [id, items, caption] of [
       [
@@ -838,6 +871,8 @@ function renderDetail() {
         `${j.workflow} · v${j.snapshot.workflows[j.workflow].version}`,
       ],
       ["Repository revision", j.repository.revision],
+      ["Release", j.snapshot.release_id || "Local / draft snapshot"],
+      ["Release / candidate digest", j.snapshot.release_digest || "Legacy snapshot"],
       ["Definition hash", j.snapshot.definition_hash],
       ["Worker image", worker.image],
       ["Policy", j.snapshot.policy_version],

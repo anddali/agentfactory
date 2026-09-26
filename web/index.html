@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta name="color-scheme" content="dark light" />
     <title>Factories · Operations</title>
-    <link rel="stylesheet" href="/styles.css?v=connector-groups-6" />
-    <script defer src="/app.js?v=connector-groups-6"></script>
+    <link rel="stylesheet" href="/styles.css?v=design-workspace-3" />
+    <script defer src="/app.js?v=design-workspace-3"></script>
+    <script defer src="/configuration.js?v=3"></script>
   </head>
   <body>
     <div class="portal">
@@ -21,32 +22,18 @@
           ><span class="subtle">⌄</span>
         </div>
         <nav aria-label="Main navigation">
-          <div class="nav-caption">WORKSPACE</div>
-          <a href="#overview" data-nav="overview"
-            ><span aria-hidden="true">▦</span>Overview</a
-          ><a href="#floor" data-nav="floor"
-            ><span aria-hidden="true">▥</span>Factory floor<span
-              id="nav-active"
-              class="nav-count"
-              >—</span
-            ></a
-          ><a href="#lines" data-nav="lines"
-            ><span aria-hidden="true">⟐</span>Production lines</a
-          ><a href="#jobs" data-nav="jobs"
-            ><span aria-hidden="true">≡</span>Jobs & receipts</a
-          ><a href="#gates" data-nav="gates"
-            ><span aria-hidden="true">◇</span>Human gates<span
-              id="nav-gates"
-              class="nav-count amber"
-              >—</span
-            ></a
-          >
-          <div class="nav-caption">OBSERVABILITY</div>
-          <a href="#activity" data-nav="activity"
-            ><span aria-hidden="true">↗</span>Activity</a
-          ><a href="#connectors" data-nav="connectors"><span aria-hidden="true">⌁</span>Connectors</a><a href="#platform" data-nav="platform"
-            ><span aria-hidden="true">⌘</span>Platform</a
-          >
+          <div class="nav-caption">OPERATIONS</div>
+          <a href="#overview" data-nav="overview"><span aria-hidden="true">▦</span>Overview</a>
+          <a href="#floor" data-nav="floor"><span aria-hidden="true">▥</span>Factory floor<span id="nav-active" class="nav-count">—</span></a>
+          <a href="#jobs" data-nav="jobs"><span aria-hidden="true">≡</span>Jobs & receipts</a>
+          <a href="#gates" data-nav="gates"><span aria-hidden="true">◇</span>Human gates<span id="nav-gates" class="nav-count amber">—</span></a>
+          <a href="#activity" data-nav="activity"><span aria-hidden="true">↗</span>Activity</a>
+          <div class="nav-caption">DESIGN</div>
+          <a href="#workflows" data-nav="workflows"><span aria-hidden="true">⟐</span>Workflows</a>
+          <a href="#prompts" data-nav="prompts"><span aria-hidden="true">✎</span>Prompts</a>
+          <div class="nav-caption">SETTINGS</div>
+          <a href="#connectors" data-nav="connectors"><span aria-hidden="true">⌁</span>Connectors</a>
+          <a href="#platform" data-nav="platform"><span aria-hidden="true">⌘</span>Platform</a>
         </nav>
         <div class="sidebar-bottom">
           <div class="human-policy">
@@ -129,14 +116,21 @@
       <form id="launch-form">
         <div class="dialog-head"><h2 id="launch-title">Run workflow</h2><button id="launch-close" type="button" aria-label="Close workflow form">×</button></div>
         <div class="connector-body">
-          <p>Choose a workflow and enter a repository URL accessible to your connected provider credentials. Factory uses its default branch, or the PR head for a pull request.</p>
+          <p>Choose a workflow. For a PR review, paste its link; Factory fetches the description, changes and discussion. You can also link a ticket.</p>
           <label>Workflow<select id="launch-workflow" required></select></label>
+          <div id="launch-review-fields" hidden>
+            <label>Pull request URL<input id="launch-pr-url" type="url" maxlength="2048" placeholder="https://github.com/owner/repository/pull/123"></label>
+            <label>Linked ticket (optional)<input id="launch-ticket" maxlength="2048" placeholder="Jira key or link, GitHub issue link, Azure work item link"></label>
+            <p class="subtle">Reviews publish findings to the PR. Actionable findings can trigger the configured fix and review cycle.</p>
+          </div>
+          <div id="launch-task-fields">
           <label>Repository URL or alias<input id="launch-repository" required maxlength="2048" placeholder="https://github.com/owner/repository"></label>
           <label>Task source<select id="launch-provider"><option value="manual">Manual task</option><option value="jira">Jira issue</option><option value="github_pr">GitHub pull request</option><option value="ado_pr">Azure DevOps pull request</option></select></label>
           <label>Issue key or PR number (optional for a manual task)<input id="launch-key" maxlength="120" autocomplete="off" aria-describedby="jira-search-status"></label>
           <div id="jira-search" hidden><p id="jira-search-status" role="status"></p><div id="jira-results" class="jira-results" aria-label="Matching Jira issues"></div></div>
           <label>Title<input id="launch-task-title" maxlength="500" required></label>
           <label>Task details<textarea id="launch-body" rows="7" maxlength="100000"></textarea></label>
+          </div>
           <p id="launch-error" class="notice" role="alert" hidden></p>
           <button id="launch-submit" type="submit" class="primary">Run workflow</button>
         </div>
@@ -274,4 +268,3 @@
     </dialog>
   </body>
 </html>
-

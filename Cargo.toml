@@ -16,6 +16,10 @@ path = "src/bin/server.rs"
 name = "factory-worker"
 path = "src/bin/worker.rs"
 
+[[bin]]
+name = "factory-bundle"
+path = "src/bin/bundle.rs"
+
 [dependencies]
 anyhow = "1"
 axum = "0.8"

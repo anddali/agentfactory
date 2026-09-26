@@ -2,7 +2,7 @@
 # research-plan.yaml, pr-review.yaml and pr-review-fix.yaml (exclude demo.yaml).
 policy_version: production-v1
 allow_fixture: false
-allowed_permissions: [repository.read, issue.read, repository.branch.write, pull_request.create]
+allowed_permissions: [repository.read, issue.read, repository.branch.write, pull_request.create, pull_request.comment]
 workers:
   coding-standard:
     version: 1
@@ -25,7 +25,7 @@ agents:
       timeout_seconds: 1200
       tools: [terminal, file_editor]
 validations:
-  repository-tests: [npm, test]
+  repository-tests: [/usr/local/bin/python, /opt/factory/validate.py]
 # Configure provider credentials in the portal and submit repository URLs.
 # Optional aliases may supply branch/workflow/maintainer overrides.
 default_workflow: research-plan

@@ -233,7 +233,7 @@ Keep keys in ignored `.env`, and model/limits in YAML.
 | Change | Apply |
 | --- | --- |
 | `.env` or Compose environment | `docker compose up -d --force-recreate server` |
-| Model/profile, workflows, prompts, web | `docker compose build server`, then `docker compose up -d server` |
+| Model/profile, web (workflow/prompt changes use the portal) | `docker compose build server`, then `docker compose up -d server` |
 | OpenHands adapter or dependencies | `docker compose build openhands-image` |
 | Worker code/toolchain | Rebuild affected worker images; rebuild server too for shared Rust changes. |
 
@@ -288,7 +288,15 @@ This setup is still required for issue-to-PR operation. **Do not run `research-p
 
 Use section 4's submission command with `workflow = 'research-plan'`, `repository = 'example-service'`, and the issue's provider/key/title/body. The workflow checks out a pinned revision, researches, waits for approval, plans, waits again, then implements, validates, pushes a branch, and opens a PR. **Approving the plan permits that implementation sequence.** It does not automatically merge.
 
-PR review uses `workflow = 'pr-review'`, provider `github_pr` or `ado_pr`, and the numeric PR ID as `issue.key`. Findings can trigger bounded fix/review follow-ups; fixes can push to the PR branch. This is not a read-only review flow. Fork PR writes are unsupported by the current authority model.
+PR review requires only a PR link. Choose **pr-review** in **Run workflow**, paste a GitHub or Azure DevOps PR URL, and optionally add a Jira key/link, GitHub issue link, or Azure work item link. The platform fetches the real title/description and optional ticket (including configured Jira fields or Azure acceptance criteria). The equivalent API is `POST /api/pr-reviews` with `{"pr_url":"https://github.com/owner/repo/pull/123","ticket":"TEAM-42"}`, an operator bearer token and `Idempotency-Key`; `ticket` is optional and `workflow` defaults to `pr-review`. The older structured submission API remains supported and also hydrates PR metadata.
+
+Each review collects fresh general comments, submitted reviews and inline discussion, including replies and resolved/outdated thread metadata, then computes the entire merge-base-to-pinned-head diff. Context, diff, findings JSON and the readable review are preserved as portal artifacts. GitHub findings are published as a commit-linked review, with inline comments where the location belongs to the diff; Azure findings are published as a PR discussion thread. Existing concerns stay in the fix input and summary without duplicate inline comments when the report references their comment ID. Provider errors, oversized context and pagination limits fail explicitly rather than silently dropping discussion. GitHub thread resolution requires GraphQL read access, and publication requires PR write access (`pull_request.comment` platform permission). See the [GitHub review API](https://docs.github.com/en/rest/pulls/reviews), [GitHub thread schema](https://docs.github.com/en/graphql/reference/pulls#pullrequestreviewthread), and [Azure PR threads API](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads).
+
+Findings can trigger bounded fix/review follow-ups; fixes can push to the PR branch. Fresh context is collected for each attempt. A changed PR head or target branch stops the pinned job; a base change during review prevents publication. Fix pushes use an explicit head lease to avoid overwriting concurrent changes. Start a new review when a job reports stale PR context. Fork PR writes remain unsupported. Publication retries find the existing job/commit marker before creating another review; no approval or merge action is performed.
+
+The bundled OpenHands worker includes Rust/Cargo and Node/npm. `repository-tests` detects root Rust projects (`cargo test --locked`) or npm projects (`npm ci` then `npm test`), requiring lockfiles and a test script. Other languages/package managers need a configured validation profile and corresponding worker tools. Missing executables now include the program and operating-system error in the receipt.
+
+Existing installations must rebuild the server and OpenHands worker, then publish and activate a new `pr-review` release containing the updated review and fix workflows and `review@3` prompt. Restarting alone does not update registry releases. Existing jobs retain their pinned image, commands and workflows; launch a new review after upgrading.
 
 AWS examples are in [deploy/aws/README.md](deploy/aws/README.md). The current deployment is local Docker. An external deployment needs its own authentication, HTTPS, networking, credential, backup, and acceptance-test setup.
 
@@ -410,3 +418,41 @@ Operators can dismiss failed, timed out, rejected, or cancelled jobs from the Fa
 Jira issue lookup: in **Run workflow**, choose **Jira issue** and type at least two characters in the issue-key field. Factory queries Jira's issue picker after a short pause and shows up to 20 matching keys and summaries. Select a result to fill the key and title; submission fetches the current issue details. Search requires an operator identity and an enabled Jira connector, and uses the connector account's Jira visibility. The API is `GET /api/jira/issues?query=...` (2–120 characters).
 
 Jira additional fields: open **Connectors → Jira Cloud → Additional issue fields** and click **Load fields from Jira**. Search by name or ID, add fields, edit their headings, and reorder them. **Preview task details** uses the current form credentials and mappings without saving or enabling the connector, and reports included, empty, or unavailable fields. Save the connector to apply. Up to 20 fields are stored by stable Jira ID. Description comes first; nonempty additional fields are appended under headings. Rich text and common option/user/list values are converted to readable text. Portal selection, submission, and Jira webhook intake use the same formatter; each submitted job retains its combined issue snapshot. Loading fields requires the Jira field-list API permission (classic `read:jira-work`).
+
+
+### Versioned prompts and workflow releases
+
+Open **Workflows** or **Prompts** under **Design** in the portal. Workflows appear once each; examples and fixture tests have a separate filter. Each workflow has Overview, Draft, Versions and Runs tabs. Configuration uses PostgreSQL by default (`FACTORY_CONFIGURATION_SOURCE=registry`). On the first start only, existing YAML and Markdown files are imported atomically. Later deployments and restarts do not overwrite the registry or require those files. Back up PostgreSQL to preserve drafts, releases and activation history.
+
+Grant `configuration_editor` to people who may save drafts, validate definitions and run fixture tests; grant `configuration_publisher` to people who may publish prompt revisions and activate/restore workflow releases. These are global configuration permissions, separate from repository operator and approval permissions. New local setup credentials include both roles; existing installations must add them to the intended identity in `FACTORY_IDENTITIES` and restart once.
+
+1. Open a workflow and choose **Edit draft**, or use **New workflow** / **Import** from the list.
+2. Edit instructions in **Edit**. The phase outline shows where they are used; **Advanced YAML** exposes workflow structure and dependencies.
+3. Continue to **Review** to inspect highlighted changes. Changed prompt and workflow versions are assigned automatically, references are updated, and the candidate is saved and validated.
+4. In **Check & test**, optionally run a **fixture test**. This snapshots the candidate and runs fixture agents only in `local-demo`, with operator permission required. Gates still require normal approval. Test status and a link to the run appear against the candidate; later edits make earlier results visibly out of date.
+5. In **Publish**, add a change note and choose **Publish and activate** for new jobs, or **Publish only** to retain the current active release. Publication and optional activation complete atomically with closing the saved draft.
+6. Use **Versions** to compare, export, activate an unpublished-to-runtime release, or **Restore this release** with a reason. Release numbers are readable and scoped to each workflow.
+
+Drafts support explicit saves, unsaved-change navigation protection, and discarding work in progress without deleting release history.
+
+A release contains the root workflow, all reachable follow-up workflows (including bounded cycles), and their exact prompts. Revisions cannot be overwritten with different content; repeated identical imports reuse the release. Draft saves and activation use optimistic concurrency. A stale import is rejected if the active generation advanced: export the current release and reapply/review your changes before publishing. Failed validation or publication leaves the active release unchanged.
+
+Rollback changes only the release selected for future jobs. Queued/running jobs, retries, approval waits, and follow-up jobs keep their original snapshot. Replaying a submission's idempotency key returns its original job across release changes. A fresh run uses a fresh key. Receipts identify the release ID and digest alongside the exact runtime snapshot. Restoring a release does not reverse effects from executed jobs.
+
+The **Prompts** library groups revisions by logical name and shows consuming workflows. Edit instructions, review the diff, and select which consumers should receive review drafts. Publication automatically assigns the next prompt revision and creates only those selected drafts; active workflows stay unchanged until their drafts are published and activated. Consumers with an existing draft must adopt the revision inside that draft. New workflows combining existing capabilities require no deployment; new capabilities, integrations and platform profiles still require code/configuration deployment. Releases resolve allowed platform profiles at submission; the resulting job pins their exact values and worker image digest. They do not freeze runtime credentials.
+
+### Offline workflow development
+
+Export a release from the portal as a JSON bundle. The CLI unpacks it to editable YAML and Markdown plus `release.lock`, without a portal connection or database:
+
+```powershell
+cargo run --bin factory-bundle -- unpack config/platform.yaml research-plan-bundle.json ./local-workflow
+cargo run --bin factory-bundle -- pack config/platform.yaml research-plan ./local-workflow ./candidate.json --locked
+cargo run --bin factory-bundle -- validate config/platform.yaml ./candidate.json
+```
+
+`--locked` rejects content changes against the exported digest. To package intentional edits, omit `--locked` and import `candidate.json` into the portal as a draft; portal review assigns changed revisions automatically. Unpack requires a new directory to avoid overwriting local work. YAML formatting/comments do not affect release identity; prompt bytes do. The bundle contains no credentials or platform overrides. Local validation requires compatible profiles in the supplied platform configuration.
+
+For a new local workflow, place YAML under `workflows/` and Markdown under `prompts/`, then use `pack` with their parent directory and the root workflow ID. Every reference must exist locally; no implicit network fetch or production fallback occurs.
+
+To execute local definitions through a development control plane, set `FACTORY_CONFIGURATION_SOURCE=files`, `FACTORY_WORKFLOWS` and `FACTORY_PROMPTS` before starting `factory-server` with a development platform (`allow_fixture: true`). Files are loaded at startup; restart after editing. This mode does not seed or modify the portal registry and disables portal configuration mutations. Execution still needs the normal PostgreSQL, worker and provider setup; offline bundle validation does not. Use a separate development database when testing locally. Portal fixture tests do not validate live-model quality or provider connectivity.

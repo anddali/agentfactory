@@ -25,6 +25,8 @@ pub struct Issue {
     pub title: String,
     pub body: String,
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<serde_json::Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Submission {

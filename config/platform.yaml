@@ -6,6 +6,7 @@ allowed_permissions:
   - issue.read
   - repository.branch.write
   - pull_request.create
+  - pull_request.comment
 workers:
   coding-standard:
     version: 2
@@ -36,7 +37,7 @@ agents:
     version: 1
     backend: fixture
 validations:
-  repository-tests: ["npm", "test", "--", "--runInBand"]
+  repository-tests: ["/usr/local/bin/python", "/opt/factory/validate.py"]
 repositories:
   local-demo:
     provider: fixture

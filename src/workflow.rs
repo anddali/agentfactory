@@ -110,6 +110,8 @@ pub fn capability(name: &str) -> Option<&'static str> {
         "agent.execute" | "artifact.publish" | "validation.run" => Some(""),
         "repository.push_branch" => Some("repository.branch.write"),
         "pull_request.open" => Some("pull_request.create"),
+        "pull_request.fetch" => Some("repository.read"),
+        "pull_request.publish_review" => Some("pull_request.comment"),
         _ => None,
     }
 }
@@ -185,6 +187,7 @@ impl Workflow {
                     "agent.execute" => &["prompt", "output"],
                     "artifact.publish" => &["name", "path"],
                     "validation.run" => &["profile"],
+                    "pull_request.publish_review" => &["path"],
                     _ => &[],
                 };
                 ensure!(
@@ -200,6 +203,13 @@ impl Workflow {
                         ensure!(relative_file(path), "unsafe output path");
                         produced.insert(path.clone());
                     }
+                    if phase.id == "review" {
+                        produced.insert("review.json".into());
+                    }
+                }
+                if task.uses == "pull_request.fetch" {
+                    produced.insert(".factory-pr-context.json".into());
+                    produced.insert(".factory-pr.diff".into());
                 }
                 if task.uses == "artifact.publish" {
                     let name = task.with.get("name").context("artifact name required")?;
@@ -210,7 +220,7 @@ impl Workflow {
                     );
                     ensure!(
                         produced.contains(path),
-                        "artifact must be produced by an earlier agent task"
+                        "artifact must be produced by an earlier task"
                     );
                     ensure!(
                         phase_outputs.insert(format!("phases.{}.artifacts.{name}", phase.id)),
@@ -221,6 +231,22 @@ impl Workflow {
                     ensure!(
                         task.with.contains_key("profile"),
                         "validation profile required"
+                    );
+                }
+                if task.uses == "pull_request.publish_review" {
+                    ensure!(
+                        task.with
+                            .get("path")
+                            .is_some_and(|p| relative_file(p) && produced.contains(p)),
+                        "review publication requires an earlier agent output path"
+                    );
+                    ensure!(
+                        phase
+                            .tasks
+                            .iter()
+                            .take_while(|t| t.uses != "pull_request.publish_review")
+                            .any(|t| t.uses == "pull_request.fetch"),
+                        "review publication requires PR context collection first"
                     );
                 }
             }

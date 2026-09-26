@@ -27,6 +27,7 @@ pub struct App {
     pub store: Store,
     pub platform: Platform,
     pub snapshot: Snapshot,
+    pub local_configuration: bool,
     pub executor: Executor,
     pub blobs: Blobs,
     pub http: reqwest::Client,
@@ -116,7 +117,16 @@ impl App {
         );
         self.store.attempt_job(attempt).await
     }
-    pub async fn submit(&self, key: &str, mut input: Submission, actor: &str) -> Result<Job> {
+    pub async fn submit(&self, key: &str, input: Submission, actor: &str) -> Result<Job> {
+        self.submit_snapshot(key, input, actor, None).await
+    }
+    async fn submit_snapshot(
+        &self,
+        key: &str,
+        mut input: Submission,
+        actor: &str,
+        candidate: Option<Snapshot>,
+    ) -> Result<Job> {
         ensure!(
             !key.is_empty() && key.len() <= 200,
             "Idempotency-Key must contain 1–200 characters"
@@ -135,11 +145,25 @@ impl App {
             ),
             "unsupported issue provider"
         );
-        let digest = hash(serde_json::to_vec(&input)?);
+        let digest = if let Some(candidate) = &candidate {
+            hash(serde_json::to_vec(
+                &json!({"submission":input,"candidate":candidate.definition_hash}),
+            )?)
+        } else {
+            hash(serde_json::to_vec(&input)?)
+        };
         let request_key = format!("{actor}:{key}");
         if let Some(job) = self.store.existing(&request_key, &digest).await? {
             return Ok(job);
         }
+        let selected = match candidate {
+            Some(s) => s,
+            None if self.local_configuration => {
+                crate::releases::Bundle::from_snapshot(&self.snapshot, &input.workflow)?
+                    .resolve(&self.platform)?
+            }
+            None => crate::releases::active(&self.store, &self.platform, &input.workflow).await?,
+        };
         let repo = crate::repositories::resolve(
             &self.store,
             &self.executor.secret,
@@ -149,11 +173,11 @@ impl App {
         )
         .await?;
         ensure!(
-            self.snapshot.workflows.contains_key(&input.workflow),
+            selected.workflows.contains_key(&input.workflow),
             "workflow is not registered"
         );
         ensure!(
-            !self.snapshot.workflows[&input.workflow]
+            !selected.workflows[&input.workflow]
                 .phases
                 .iter()
                 .flat_map(|p| p.inputs.values())
@@ -219,9 +243,36 @@ impl App {
                     request.bearer_auth(credential)
                 };
             }
-            let response: Value = request.send().await?.error_for_status()?.json().await?;
+            let response = crate::pull_requests::read_json(request).await?;
             let context =
                 crate::providers::pull_request_context(&repo.provider, &repo.url, &response)?;
+            let ticket = match input
+                .issue
+                .ticket
+                .as_ref()
+                .and_then(|v| v["reference"].as_str())
+            {
+                Some(reference) => {
+                    Some(crate::pull_requests::ticket(self, reference, &input.repository).await?)
+                }
+                None => None,
+            };
+            let pr_url = format!(
+                "{}/{}/{number}",
+                repo.url.trim_end_matches('/').trim_end_matches(".git"),
+                if repo.provider == "github" {
+                    "pull"
+                } else {
+                    "pullrequest"
+                }
+            );
+            input.issue = crate::pull_requests::metadata_issue(
+                &repo.provider,
+                &number.to_string(),
+                &pr_url,
+                &response,
+                ticket,
+            )?;
             work_branch = context.1;
             base_branch = context.2;
             context.0
@@ -281,10 +332,7 @@ impl App {
             revision.len() == 40 && revision.bytes().all(|c| c.is_ascii_hexdigit()),
             "repository revision must be a full commit SHA"
         );
-        let snapshot = self
-            .executor
-            .pin(self.snapshot.clone(), &input.workflow)
-            .await?;
+        let snapshot = self.executor.pin(selected, &input.workflow).await?;
         let repository = Repository {
             id: input.repository.clone(),
             url: repo.url.clone(),
@@ -302,6 +350,26 @@ impl App {
 pub fn router(app: Arc<App>, web: &str) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/configuration", get(configuration))
+        .route("/api/configuration/prompts", post(prompt_publish))
+        .route("/api/configuration/prompts/revise", post(prompt_revise))
+        .route("/api/configuration/prepare", post(bundle_prepare))
+        .route(
+            "/api/configuration/drafts/{id}/discard",
+            post(draft_discard),
+        )
+        .route("/api/configuration/drafts/{id}", put(draft_save))
+        .route("/api/configuration/validate", post(bundle_validate))
+        .route("/api/configuration/releases", post(release_publish))
+        .route(
+            "/api/configuration/releases/{id}/export",
+            get(release_export),
+        )
+        .route(
+            "/api/configuration/releases/{id}/activate",
+            post(release_activate),
+        )
+        .route("/api/configuration/drafts/{id}/test", post(draft_test))
         .route("/api/access", get(access))
         .route("/api/connectors", get(connectors_list))
         .route("/api/connectors/{kind}", put(connectors_save))
@@ -312,6 +380,7 @@ pub fn router(app: Arc<App>, web: &str) -> Router {
         .route("/api/connectors/jira/preview/{key}", post(jira_preview))
         .route("/api/jira/issues/{key}", get(jira_details))
         .route("/api/jobs", get(jobs).post(submit))
+        .route("/api/pr-reviews", post(submit_review))
         .route("/api/jobs/{id}", get(job))
         .route("/api/jobs/{id}/receipt", get(receipt))
         .route("/api/jobs/{id}/cancel", post(cancel))
@@ -363,7 +432,7 @@ async fn access(State(app): State<Arc<App>>, headers: HeaderMap) -> Api<Json<Val
         .map(|(id, _)| id)
         .collect();
     Ok(Json(
-        json!({"subject":identity.subject,"approvable_repositories":repositories,"manage_connectors":identity.roles.iter().any(|r|r=="connector_admin"),"operable_repositories":if identity.roles.iter().any(|r|r=="operator") {identity.repositories.clone()} else {vec![]},"dynamic_approvable_repositories":if identity.roles.iter().any(|r|r=="approver") {identity.repositories.clone()} else {vec![]}}),
+        json!({"edit_configuration":!app.local_configuration && identity.roles.iter().any(|r|r=="configuration_editor"),"publish_configuration":!app.local_configuration && identity.roles.iter().any(|r|r=="configuration_publisher"),"subject":identity.subject,"approvable_repositories":repositories,"manage_connectors":identity.roles.iter().any(|r|r=="connector_admin"),"operable_repositories":if identity.roles.iter().any(|r|r=="operator") {identity.repositories.clone()} else {vec![]},"dynamic_approvable_repositories":if identity.roles.iter().any(|r|r=="approver") {identity.repositories.clone()} else {vec![]}}),
     ))
 }
 async fn catalog(State(app): State<Arc<App>>, headers: HeaderMap) -> Api<Json<Value>> {
@@ -372,7 +441,7 @@ async fn catalog(State(app): State<Arc<App>>, headers: HeaderMap) -> Api<Json<Va
     }
     let repos: Vec<_> = app.platform.repositories.iter().filter(|(id,_)| app.read(&headers,id).is_ok()).map(|(id,r)| json!({"id":id,"provider":r.provider,"branch":r.branch,"workflow":r.workflow})).collect();
     Ok(Json(
-        json!({"workflows":app.snapshot.workflows,"repositories":repos,"policy_version":app.snapshot.policy_version,"executor":app.executor.mode,"storage":if app.blobs.bucket.is_some(){"S3"}else{"filesystem"},"public_read":app.public_read}),
+        json!({"configuration_source":if app.local_configuration { "files" } else { "registry" },"workflows":if app.local_configuration {app.snapshot.workflows.clone()} else {crate::releases::catalog(&app.store).await?},"repositories":repos,"policy_version":app.snapshot.policy_version,"executor":app.executor.mode,"storage":if app.blobs.bucket.is_some(){"S3"}else{"filesystem"},"public_read":app.public_read}),
     ))
 }
 fn summary(j: &Job) -> Value {
@@ -411,7 +480,7 @@ async fn receipt(
         .map(|(k, v)| (k.clone(), json!({"sha256":v.sha256})))
         .collect();
     Ok(Json(
-        json!({"job_id":job.id,"case_id":job.case_id,"parent_id":job.parent_id,"workflow":job.snapshot.workflows[&job.workflow],"definition_hash":job.snapshot.definition_hash,"repository":job.repository,"status":job.status,"created_at":job.created_at,"finished_at":job.finished_at,"policy_version":job.snapshot.policy_version,"platform_version":job.snapshot.platform_version,"platform_revision":job.snapshot.platform_revision,"worker_profiles":job.snapshot.workers,"agent_profiles":job.snapshot.agents,"prompts":prompts,"attempts":job.attempts,"gates":job.gates}),
+        json!({"job_id":job.id,"case_id":job.case_id,"parent_id":job.parent_id,"workflow":job.snapshot.workflows[&job.workflow],"release_id":job.snapshot.release_id,"release_digest":job.snapshot.release_digest,"definition_hash":job.snapshot.definition_hash,"repository":job.repository,"status":job.status,"created_at":job.created_at,"finished_at":job.finished_at,"policy_version":job.snapshot.policy_version,"platform_version":job.snapshot.platform_version,"platform_revision":job.snapshot.platform_revision,"worker_profiles":job.snapshot.workers,"agent_profiles":job.snapshot.agents,"prompts":prompts,"attempts":job.attempts,"gates":job.gates}),
     ))
 }
 async fn events(State(app): State<Arc<App>>, headers: HeaderMap) -> Api<Json<Value>> {
@@ -563,6 +632,57 @@ async fn jira_search(
     Ok(Json(json!({"issues":issues})))
 }
 
+async fn submit_review(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(input): Json<crate::pull_requests::ReviewSubmission>,
+) -> Api<Json<Value>> {
+    let identity = app.identity(&headers)?;
+    let (repository, provider, number) = crate::pull_requests::parse_link(&input.pr_url)?;
+    let repository = app
+        .platform
+        .repositories
+        .iter()
+        .find(|(id, config)| {
+            identity.access(id, "operator")
+                && config.provider == provider.trim_end_matches("_pr")
+                && if config.provider == "github" {
+                    crate::providers::github_repository_url(&config.url).is_some_and(|url| {
+                        Some(url) == crate::providers::github_repository_url(&repository)
+                    })
+                } else {
+                    config.url.trim_end_matches('/') == repository.trim_end_matches('/')
+                }
+        })
+        .map(|(id, _)| id.clone())
+        .unwrap_or(repository);
+    ensure!(
+        identity.access(&repository, "operator"),
+        "forbidden: repository operator access required"
+    );
+    let submission = Submission {
+        workflow: input.workflow,
+        repository,
+        issue: Issue {
+            provider,
+            key: number,
+            title: String::new(),
+            body: String::new(),
+            url: Some(input.pr_url),
+            ticket: input
+                .ticket
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| json!({"reference":s.trim()})),
+        },
+    };
+    let key = headers
+        .get("Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .context("Idempotency-Key required")?;
+    Ok(Json(summary(
+        &app.submit(key, submission, &identity.subject).await?,
+    )))
+}
 async fn submit(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -709,9 +829,9 @@ async fn claim(
         .await?;
     let mut manifest = manifest(&job)?;
     let permissions = &job.phase().permissions;
-    let write = permissions
-        .iter()
-        .any(|p| p == "repository.branch.write" || p == "pull_request.create");
+    let write = permissions.iter().any(|p| {
+        p == "repository.branch.write" || p == "pull_request.create" || p == "pull_request.comment"
+    });
     if write || permissions.iter().any(|p| p == "repository.read") {
         // Check the pinned destination too before issuing a credential to a worker.
         let pinned = crate::repositories::pinned(&app.platform, &job.repository);
@@ -900,6 +1020,7 @@ async fn github(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) ->
         workflow,
         repository,
         issue: Issue {
+            ticket: None,
             provider: "github".into(),
             key: number.to_string(),
             title: payload["issue"]["title"].as_str().unwrap_or("").into(),
@@ -971,6 +1092,7 @@ async fn jira(
         workflow,
         repository: payload.repository,
         issue: Issue {
+            ticket: None,
             provider: "jira".into(),
             key: payload.issue.key,
             title: payload.issue.fields.summary,
@@ -1139,4 +1261,470 @@ async fn connectors_test(
         )
         .await?,
     ))
+}
+
+fn configuration_role<'a>(
+    app: &'a App,
+    headers: &HeaderMap,
+    publish: bool,
+) -> Result<&'a Identity> {
+    anyhow::ensure!(
+        !app.local_configuration,
+        "configuration management is disabled in local files mode"
+    );
+    let identity = app.identity(headers)?;
+    let role = if publish {
+        "configuration_publisher"
+    } else {
+        "configuration_editor"
+    };
+    anyhow::ensure!(
+        identity.roles.iter().any(|r| r == role),
+        "forbidden: {role} required"
+    );
+    Ok(identity)
+}
+async fn configuration(State(app): State<Arc<App>>, headers: HeaderMap) -> Api<Json<Value>> {
+    let i = app.identity(&headers)?;
+    ensure!(
+        i.roles
+            .iter()
+            .any(|r| r == "configuration_editor" || r == "configuration_publisher"),
+        "forbidden: configuration access required"
+    );
+    let mut releases: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(r) FROM workflow_releases r ORDER BY created_at DESC, id DESC",
+    )
+    .fetch_all(&app.store.pool)
+    .await?;
+    let active: Vec<Value> =
+        sqlx::query_scalar("SELECT to_jsonb(a) FROM active_releases a ORDER BY workflow")
+            .fetch_all(&app.store.pool)
+            .await?;
+    let mut drafts: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(d) FROM configuration_drafts d ORDER BY updated_at DESC",
+    )
+    .fetch_all(&app.store.pool)
+    .await?;
+    let revisions: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(r) FROM configuration_revisions r ORDER BY created_at DESC",
+    )
+    .fetch_all(&app.store.pool)
+    .await?;
+    let audit: Vec<Value> =
+        sqlx::query_scalar("SELECT to_jsonb(a) FROM release_audit a ORDER BY id DESC LIMIT 200")
+            .fetch_all(&app.store.pool)
+            .await?;
+    for entry in releases.iter_mut().chain(drafts.iter_mut()) {
+        let definitions = describe_bundle(&serde_json::from_value::<crate::releases::Bundle>(
+            entry["bundle"].clone(),
+        )?);
+        let fixture = definitions
+            .values()
+            .filter_map(|w| serde_json::from_value::<crate::workflow::Workflow>(w.clone()).ok())
+            .all(|w| {
+                std::iter::once(&w.defaults.agent_profile)
+                    .chain(w.phases.iter().filter_map(|p| p.agent_profile.as_ref()))
+                    .all(|id| {
+                        app.platform
+                            .agents
+                            .get(id)
+                            .is_some_and(|a| a.backend == "fixture")
+                    })
+            });
+        entry["definitions"] = json!(definitions);
+        entry["is_fixture"] = json!(fixture);
+    }
+    let tests: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(t) || jsonb_build_object('status',j.status,'repository',j.document->'repository'->>'id') FROM configuration_tests t JOIN jobs j ON j.id=t.job_id ORDER BY t.created_at DESC LIMIT 500").fetch_all(&app.store.pool).await?;
+    let tests: Vec<_> = tests
+        .into_iter()
+        .filter(|t| {
+            app.read(&headers, t["repository"].as_str().unwrap_or(""))
+                .is_ok()
+        })
+        .collect();
+    Ok(Json(
+        json!({"releases":releases,"active":active,"drafts":drafts,"revisions":revisions,"audit":audit,"tests":tests}),
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftInput {
+    revision: i64,
+    bundle: crate::releases::Bundle,
+}
+async fn draft_save(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<DraftInput>,
+) -> Api<Json<Value>> {
+    let actor = configuration_role(&app, &headers, false)?;
+    ensure!(
+        serde_json::to_vec(&input.bundle)?.len() <= 2_000_000,
+        "draft too large"
+    );
+    let revision: Option<i64> = if input.revision == 0 {
+        sqlx::query_scalar("INSERT INTO configuration_drafts(id,revision,bundle,actor) VALUES($1,1,$2,$3) ON CONFLICT DO NOTHING RETURNING revision").bind(id).bind(serde_json::to_value(input.bundle)?).bind(&actor.subject).fetch_optional(&app.store.pool).await?
+    } else {
+        sqlx::query_scalar("UPDATE configuration_drafts SET revision=revision+1,bundle=$3,actor=$4,updated_at=now() WHERE id=$1 AND revision=$2 AND status='editing' RETURNING revision").bind(id).bind(input.revision).bind(serde_json::to_value(input.bundle)?).bind(&actor.subject).fetch_optional(&app.store.pool).await?
+    };
+    Ok(Json(
+        json!({"id":id,"revision":revision.context("conflict: draft changed; reload before saving")?}),
+    ))
+}
+async fn bundle_validate(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(bundle): Json<crate::releases::Bundle>,
+) -> Api<Json<Value>> {
+    ensure!(
+        !app.local_configuration,
+        "configuration management is disabled in local files mode"
+    );
+    let identity = app.identity(&headers)?;
+    ensure!(
+        identity
+            .roles
+            .iter()
+            .any(|r| r == "configuration_editor" || r == "configuration_publisher"),
+        "forbidden: configuration access required"
+    );
+    let s = bundle.resolve(&app.platform)?;
+    Ok(Json(
+        json!({"valid":true,"digest":bundle.digest()?,"workflows":s.workflows.keys().collect::<Vec<_>>(),"prompts":s.prompts.keys().collect::<Vec<_>>(),"message":"Definition validation only; no model or tools were executed."}),
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishInput {
+    bundle: crate::releases::Bundle,
+    note: String,
+    #[serde(default)]
+    draft_id: Option<Uuid>,
+    #[serde(default)]
+    draft_revision: Option<i64>,
+    #[serde(default)]
+    activate: bool,
+}
+async fn release_publish(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(input): Json<PublishInput>,
+) -> Api<Json<Value>> {
+    let actor = configuration_role(&app, &headers, true)?;
+    ensure!(
+        input.draft_id.is_some() == input.draft_revision.is_some(),
+        "draft id and revision must be supplied together"
+    );
+    let id = crate::releases::publish_with_options(
+        &app.store,
+        &app.platform,
+        &input.bundle,
+        &actor.subject,
+        &input.note,
+        input.draft_id.zip(input.draft_revision),
+        input.activate,
+    )
+    .await?;
+    Ok(Json(json!({"id":id,"digest":input.bundle.digest()?})))
+}
+async fn release_export(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Api<Json<Value>> {
+    let i = app.identity(&headers)?;
+    ensure!(
+        i.roles
+            .iter()
+            .any(|r| r == "configuration_editor" || r == "configuration_publisher"),
+        "forbidden: configuration access required"
+    );
+    let mut bundle = crate::releases::get(&app.store, id).await?;
+    bundle.base_generation =
+        sqlx::query_scalar("SELECT generation FROM active_releases WHERE workflow=$1")
+            .bind(&bundle.workflow)
+            .fetch_optional(&app.store.pool)
+            .await?
+            .unwrap_or(0);
+    Ok(Json(serde_json::to_value(bundle)?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivateInput {
+    expected_generation: i64,
+    note: String,
+}
+async fn release_activate(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<ActivateInput>,
+) -> Api<Json<Value>> {
+    let actor = configuration_role(&app, &headers, true)?;
+    let generation = crate::releases::activate(
+        &app.store,
+        &app.platform,
+        id,
+        input.expected_generation,
+        &actor.subject,
+        &input.note,
+    )
+    .await?;
+    Ok(Json(json!({"generation":generation})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptInput {
+    name: String,
+    content: String,
+    note: String,
+}
+async fn prompt_publish(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(input): Json<PromptInput>,
+) -> Api<Json<Value>> {
+    let actor = configuration_role(&app, &headers, true)?;
+    ensure!(
+        input.name.split('@').count() == 2
+            && input.name.split('@').all(crate::workflow::identifier),
+        "versioned prompt name required"
+    );
+    ensure!(
+        !input.content.trim().is_empty()
+            && input.content.len() <= 100_000
+            && !input.note.trim().is_empty()
+            && input.note.len() <= 2000,
+        "prompt content and change note required"
+    );
+    let digest = hash(&input.content);
+    let stored: String = sqlx::query_scalar("INSERT INTO configuration_revisions(kind,name,digest,content,actor,note) VALUES('prompt',$1,$2,$3,$4,$5) ON CONFLICT(kind,name) DO UPDATE SET name=EXCLUDED.name RETURNING digest").bind(&input.name).bind(&digest).bind(input.content).bind(&actor.subject).bind(input.note).fetch_one(&app.store.pool).await?;
+    ensure!(
+        stored == digest,
+        "revision already exists with different content; increment its version"
+    );
+    Ok(Json(json!({"name":input.name,"digest":digest})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TestInput {
+    revision: i64,
+    submission: Submission,
+    key: String,
+}
+async fn draft_test(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<TestInput>,
+) -> Api<Json<Value>> {
+    let actor = configuration_role(&app, &headers, false)?;
+    ensure!(
+        actor.access(&input.submission.repository, "operator"),
+        "forbidden: operator access required"
+    );
+    ensure!(
+        app.platform
+            .repositories
+            .get(&input.submission.repository)
+            .is_some_and(|r| r.provider == "fixture"),
+        "draft tests require a designated local fixture repository"
+    );
+    let value: Value = sqlx::query_scalar(
+        "SELECT bundle FROM configuration_drafts WHERE id=$1 AND revision=$2 AND status='editing'",
+    )
+    .bind(id)
+    .bind(input.revision)
+    .fetch_optional(&app.store.pool)
+    .await?
+    .context("conflict: draft changed; save and retry")?;
+    let bundle: crate::releases::Bundle = serde_json::from_value(value)?;
+    ensure!(
+        input.submission.workflow == bundle.workflow,
+        "test workflow must match draft"
+    );
+    let mut snapshot = bundle.resolve(&app.platform)?;
+    ensure!(snapshot.agents.values().all(|a| a.backend == "fixture"), "draft tests currently require fixture agents; use local bundle execution for live harness tests");
+    snapshot.release_digest = Some(bundle.digest()?);
+    snapshot.refresh_hash()?;
+    let job = app
+        .submit_snapshot(
+            &format!("draft:{id}:{}", input.key),
+            input.submission,
+            &actor.subject,
+            Some(snapshot),
+        )
+        .await?;
+    sqlx::query("INSERT INTO configuration_tests(job_id,draft_id,candidate_digest) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(job.id).bind(id).bind(bundle.digest()?).execute(&app.store.pool).await?;
+    Ok(Json(
+        json!({"job_id":job.id,"candidate_digest":bundle.digest()?}),
+    ))
+}
+
+fn describe_bundle(bundle: &crate::releases::Bundle) -> std::collections::BTreeMap<String, Value> {
+    bundle
+        .workflows
+        .iter()
+        .filter_map(|(id, s)| {
+            serde_yaml::from_str::<crate::workflow::Workflow>(s)
+                .ok()
+                .and_then(|w| serde_json::to_value(w).ok())
+                .map(|w| (id.clone(), w))
+        })
+        .collect()
+}
+async fn bundle_prepare(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(bundle): Json<crate::releases::Bundle>,
+) -> Api<Json<Value>> {
+    configuration_role(&app, &headers, false)?;
+    let bundle = crate::releases::prepare(&app.store, &app.platform, bundle).await?;
+    Ok(Json(
+        json!({"definitions":describe_bundle(&bundle),"digest":bundle.digest()?,"bundle":bundle}),
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscardInput {
+    revision: i64,
+}
+async fn draft_discard(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<DiscardInput>,
+) -> Api<Json<Value>> {
+    let actor = configuration_role(&app, &headers, false)?;
+    let result=sqlx::query("UPDATE configuration_drafts SET status='discarded',revision=revision+1,actor=$3,updated_at=now() WHERE id=$1 AND revision=$2 AND status='editing'").bind(id).bind(input.revision).bind(&actor.subject).execute(&app.store.pool).await?;
+    ensure!(
+        result.rows_affected() == 1,
+        "conflict: draft changed; reload before discarding"
+    );
+    Ok(Json(json!({"discarded":true})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptConsumer {
+    workflow: String,
+    expected_generation: i64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptRevisionInput {
+    name: String,
+    content: String,
+    note: String,
+    expected_name: Option<String>,
+    #[serde(default)]
+    consumers: Vec<PromptConsumer>,
+}
+async fn prompt_revise(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(input): Json<PromptRevisionInput>,
+) -> Api<Json<Value>> {
+    let actor = configuration_role(&app, &headers, true)?;
+    if !input.consumers.is_empty() {
+        configuration_role(&app, &headers, false)?;
+    }
+    ensure!(
+        crate::workflow::identifier(&input.name)
+            && !input.content.trim().is_empty()
+            && input.content.len() <= 100_000
+            && !input.note.trim().is_empty()
+            && input.note.len() <= 2000,
+        "valid prompt name, instructions and change note required"
+    );
+    let mut tx = app.store.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(7812451)")
+        .execute(&mut *tx)
+        .await?;
+    let rows:Vec<(String,String)>=sqlx::query_as("SELECT name,content FROM configuration_revisions WHERE kind='prompt' ORDER BY created_at DESC,name DESC").fetch_all(&mut *tx).await?;
+    let matching: Vec<_> = rows
+        .iter()
+        .filter(|(n, _)| n.split_once('@').is_some_and(|(s, _)| s == input.name))
+        .collect();
+    let latest = matching.iter().max_by_key(|(n, _)| {
+        n.split_once('@')
+            .and_then(|(_, v)| v.parse::<u32>().ok())
+            .unwrap_or(0)
+    });
+    ensure!(
+        latest.map(|r| &r.0) == input.expected_name.as_ref(),
+        "conflict: prompt has a newer revision; reopen and review it"
+    );
+    let version = matching
+        .iter()
+        .filter_map(|(n, _)| n.split_once('@').and_then(|(_, v)| v.parse::<u32>().ok()))
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .context("prompt version exhausted")?;
+    let name = if let Some((n, _)) = matching.iter().find(|(_, c)| c == &input.content) {
+        n.clone()
+    } else {
+        format!("{}@{version}", input.name)
+    };
+    sqlx::query("INSERT INTO configuration_revisions(kind,name,digest,content,actor,note) VALUES('prompt',$1,$2,$3,$4,$5) ON CONFLICT DO NOTHING").bind(&name).bind(hash(&input.content)).bind(&input.content).bind(&actor.subject).bind(&input.note).execute(&mut *tx).await?;
+    let mut drafts = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for consumer in input.consumers {
+        ensure!(
+            seen.insert(consumer.workflow.clone()),
+            "duplicate workflow selection"
+        );
+        let row:Option<(Value,i64)>=sqlx::query_as("SELECT r.bundle,a.generation FROM active_releases a JOIN workflow_releases r ON r.id=a.release_id WHERE a.workflow=$1 FOR UPDATE OF a").bind(&consumer.workflow).fetch_optional(&mut *tx).await?;
+        let (value, generation) = row.context("workflow has no active release")?;
+        ensure!(
+            generation == consumer.expected_generation,
+            "conflict: a selected workflow changed; review its latest release"
+        );
+        let existing:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM configuration_drafts WHERE bundle->>'workflow'=$1 AND status='editing')").bind(&consumer.workflow).fetch_one(&mut *tx).await?;
+        ensure!(
+            !existing,
+            "selected workflow already has a draft; adopt the prompt from that draft instead"
+        );
+        let mut bundle: crate::releases::Bundle = serde_json::from_value(value)?;
+        bundle.base_generation = generation;
+        let mut replaced = std::collections::BTreeSet::new();
+        for source in bundle.workflows.values_mut() {
+            let mut w: crate::workflow::Workflow = serde_yaml::from_str(source)?;
+            for task in w.phases.iter_mut().flat_map(|p| &mut p.tasks) {
+                if let Some(old) = task
+                    .with
+                    .get("prompt")
+                    .cloned()
+                    .filter(|n| n.split_once('@').is_some_and(|(s, _)| s == input.name))
+                {
+                    replaced.insert(old);
+                    task.with.insert("prompt".into(), name.clone());
+                }
+            }
+            *source = serde_yaml::to_string(&w)?;
+        }
+        ensure!(
+            !replaced.is_empty(),
+            "selected workflow does not use this prompt"
+        );
+        for old in replaced {
+            bundle.prompts.remove(&old);
+        }
+        bundle.prompts.insert(name.clone(), input.content.clone());
+        bundle.resolve(&app.platform)?;
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO configuration_drafts(id,revision,bundle,actor) VALUES($1,1,$2,$3)",
+        )
+        .bind(id)
+        .bind(serde_json::to_value(&bundle)?)
+        .bind(&actor.subject)
+        .execute(&mut *tx)
+        .await?;
+        drafts.push(json!({"id":id,"workflow":bundle.workflow}));
+    }
+    tx.commit().await?;
+    Ok(Json(json!({"name":name,"drafts":drafts})))
 }

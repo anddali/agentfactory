@@ -1,7 +1,7 @@
 apiVersion: factory/v1
 kind: Workflow
 id: pr-review-fix
-version: 1
+version: 2
 description: Apply review findings on the factory branch and queue a fresh review.
 inputs:
   issue: {type: issue_ref}
@@ -19,6 +19,7 @@ phases:
       review: parent.artifacts.review
     tasks:
       - uses: repository.checkout
+      - uses: pull_request.fetch
       - uses: agent.execute
         with: {prompt: fix@1, output: fixes.md}
       - uses: artifact.publish
