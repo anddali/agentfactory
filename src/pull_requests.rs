@@ -47,7 +47,7 @@ pub fn parse_link(link: &str) -> Result<(String, String, String)> {
     );
     let kind = match parts[parts.len() - 2] {
         "pull" => "github_pr",
-        "pullrequest" if parts.iter().any(|p| *p == "_git") => "ado_pr",
+        "pullrequest" if parts.contains(&"_git") => "ado_pr",
         _ => bail!("Expected a GitHub /pull/NUMBER or Azure /pullrequest/NUMBER URL"),
     };
     let repository = parts[..parts.len() - 2].join("/");
