@@ -1,0 +1,3 @@
+# SQLx hashes the exact migration bytes. Preserve historical line endings;
+# checkout-time conversion would make an applied migration appear modified.
+migrations/*.sql -text whitespace=cr-at-eol
