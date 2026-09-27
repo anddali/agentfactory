@@ -42,7 +42,7 @@ pub struct Identity {
     pub repositories: Vec<String>,
 }
 impl Identity {
-    fn access(&self, repo: &str, role: &str) -> bool {
+    pub(crate) fn access(&self, repo: &str, role: &str) -> bool {
         self.roles.iter().any(|r| r == role)
             && self.repositories.iter().any(|r| r == repo || r == "*")
     }
@@ -92,7 +92,7 @@ impl App {
             .find(|i| secure_equal(&i.token, bearer(headers)))
             .context("unauthorized: valid API credential required")
     }
-    fn approver(&self, identity: &Identity, repo: &str) -> bool {
+    pub(crate) fn approver(&self, identity: &Identity, repo: &str) -> bool {
         identity.access(repo, "approver")
             && self
                 .platform
@@ -120,7 +120,7 @@ impl App {
     pub async fn submit(&self, key: &str, input: Submission, actor: &str) -> Result<Job> {
         self.submit_snapshot(key, input, actor, None).await
     }
-    async fn submit_snapshot(
+    pub(crate) async fn submit_snapshot(
         &self,
         key: &str,
         mut input: Submission,
@@ -395,7 +395,8 @@ pub fn router(app: Arc<App>, web: &str) -> Router {
         .route("/worker/{attempt}/inputs/{name}", get(input))
         .route("/hooks/github", post(github))
         .route("/hooks/jira", post(jira))
-        .route("/hooks/slack", post(slack))
+        .route("/hooks/slack", post(crate::slack::hook))
+        .route("/hooks/slack/interactions", post(crate::slack::hook))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(axum::middleware::map_response(
             |mut response: Response| async move {
@@ -1114,7 +1115,11 @@ async fn jira(
             .await?,
     )))
 }
-async fn slack(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Api<Json<Value>> {
+pub(crate) async fn legacy_slack(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Api<Json<Value>> {
     let secret = crate::connectors::credential(
         &app.store,
         &app.executor.secret,
@@ -1172,17 +1177,9 @@ async fn slack(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> 
     .await?;
     let subject = format!("slack:{}", form.get("user_id").context("user missing")?);
     let authorized = app
-        .platform
-        .repositories
-        .get(&job.repository.id)
-        .map_or_else(
-            || {
-                app.identities
-                    .iter()
-                    .any(|i| i.subject == subject && i.access(&job.repository.id, "approver"))
-            },
-            |r| r.maintainers.contains(&subject),
-        );
+        .identities
+        .iter()
+        .any(|i| i.subject == subject && app.approver(i, &job.repository.id));
     ensure!(
         authorized && Some(&channel) == form.get("channel_id"),
         "forbidden: approval must come from a maintainer in the configured channel"

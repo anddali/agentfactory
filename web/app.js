@@ -114,7 +114,7 @@ const jobButton = (job, text) =>
   `<button data-job="${escapeHTML(job.id)}">${escapeHTML(text || job.issue.key)}</button>`;
 function page() {
   const raw = location.hash.slice(1).split("/")[0];
-  const p = ["configuration", "lines"].includes(raw) ? "workflows" : raw;
+  const p = raw === "job" ? "jobs" : ["configuration", "lines"].includes(raw) ? "workflows" : raw;
   return Object.hasOwn(names, p) ? p : "overview";
 }
 function reportLink(jobId, artifactId) {
@@ -138,6 +138,8 @@ async function openReport(jobId, artifactId) {
 function openReportHash() {
   const match = /^#report\/([0-9a-f-]{36})\/([0-9a-f-]{36})$/i.exec(location.hash);
   if (match) openReport(match[1], match[2]);
+  const job = /^#job\/([0-9a-f-]{36})$/i.exec(location.hash);
+  if (job) loadDetail(job[1]);
 }
 function renderMarkdown(source) {
   const inline = value => escapeHTML(value).replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
@@ -1075,6 +1077,7 @@ openReportHash();
 $("detail").addEventListener("close", () => {
   selectedJob = null;
   detailData = null;
+  if (location.hash.startsWith("#job/")) location.hash = "jobs";
 });
 $("connection-button").onclick = () => $("credentials").showModal();
 $("close-credentials").onclick = () => $("credentials").close();
@@ -1084,7 +1087,7 @@ $("credential-form").onsubmit = (e) => {
   $("api-token").value = "";
   $("credentials").close();
   resetAccess();
-  if (location.hash.startsWith("#report/")) openReportHash();
+  if (location.hash.startsWith("#report/") || location.hash.startsWith("#job/")) openReportHash();
 };
 $("clear-token").onclick = () => {
   sessionStorage.removeItem("factory-observer-token");

@@ -9,6 +9,7 @@ pub mod providers;
 pub mod pull_requests;
 pub mod releases;
 pub mod repositories;
+pub mod slack;
 pub mod storage;
 pub mod store;
 pub mod worker;
