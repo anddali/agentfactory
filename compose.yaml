@@ -24,7 +24,7 @@ services:
       DATABASE_URL: postgres://factory:${POSTGRES_PASSWORD}@db:5432/factory
       FACTORY_WORKER_SECRET: ${FACTORY_WORKER_SECRET:?Run scripts/setup.ps1}
       FACTORY_IDENTITIES: ${FACTORY_IDENTITIES:?Run scripts/setup.ps1}
-      FACTORY_PUBLIC_READ: "true"
+      FACTORY_PUBLIC_READ: "false"
       FACTORY_ARTIFACT_ROOT: /data/artifacts
       FACTORY_DOCKER_NETWORK: factory_workers
       FACTORY_WORKER_SERVER_URL: http://server:8080
