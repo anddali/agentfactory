@@ -304,9 +304,20 @@ fn form(id: Uuid, w: &Workflow, data: &Value, error: Option<&str>) -> Value {
 
 /// Acknowledge promptly. Provider lookups and submissions are durable background work.
 pub async fn hook(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
+    let started = std::time::Instant::now();
     match tokio::time::timeout(Duration::from_millis(2800), hook_inner(app, headers, body)).await {
-        Ok(response) => response,
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Ok(response) => {
+            tracing::info!(
+                status = response.status().as_u16(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "Slack callback completed"
+            );
+            response
+        }
+        Err(_) => {
+            tracing::warn!("Slack callback exceeded response deadline");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
     }
 }
 async fn hook_inner(app: Arc<App>, headers: HeaderMap, body: Bytes) -> Response {
@@ -322,6 +333,7 @@ async fn hook_inner(app: Arc<App>, headers: HeaderMap, body: Bytes) -> Response 
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     if !verify(&secret, &headers, &body, Utc::now().timestamp()) {
+        tracing::warn!("Slack callback signature or timestamp rejected");
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let Ok(form_url) = reqwest::Url::parse(&format!(
@@ -360,6 +372,17 @@ async fn hook_inner(app: Arc<App>, headers: HeaderMap, body: Bytes) -> Response 
     match result {
         Ok(v) => Json(v).into_response(),
         Err(_) => {
+            tracing::warn!(
+                interaction = payload
+                    .as_ref()
+                    .and_then(|p| p["type"].as_str())
+                    .filter(|s| matches!(
+                        *s,
+                        "view_submission" | "block_actions" | "block_suggestion"
+                    ))
+                    .unwrap_or("command_or_unknown"),
+                "Slack action could not be completed; payload and provider errors withheld"
+            );
             // Never echo provider errors or repository content into an unauthorized surface.
             let view = payload.as_ref().filter(|p| p["type"] == "view_submission");
             if let Some(p) = view {
