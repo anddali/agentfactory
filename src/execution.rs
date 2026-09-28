@@ -386,7 +386,7 @@ async fn notify(
     job: &Job,
     gate_id: Uuid,
     platform: &Platform,
-    http: &reqwest::Client,
+    _http: &reqwest::Client,
 ) -> Result<()> {
     let gate = job
         .gates
@@ -406,45 +406,5 @@ async fn notify(
     }
     let channel =
         crate::connectors::slack_channel(store, master, platform, &job.repository.id).await?;
-    let token =
-        crate::connectors::credential(store, master, "slack", "token", "FACTORY_SLACK_BOT_TOKEN")
-            .await?;
-    let report_link = std::env::var("FACTORY_PORTAL_URL")
-        .ok()
-        .and_then(|base| {
-            let url = reqwest::Url::parse(&base).ok()?;
-            if url.scheme() != "https" || url.host_str().is_none() {
-                return None;
-            }
-            let artifact = job
-                .attempts
-                .iter()
-                .find(|a| a.id == gate.attempt_id)?
-                .artifacts
-                .values()
-                .next()?;
-            Some(format!(
-                "Report: <{}#report/{}/{}|View {} in portal>\n",
-                base.trim_end_matches('/'),
-                job.id,
-                artifact.id,
-                artifact.name.replace(['<', '>', '|'], "")
-            ))
-        })
-        .unwrap_or_default();
-    let text = format!("{} · {} is awaiting review.\n{}Job: {}\nArtifact digest: {}\nApprove: /factory approve {} {}\nReject: /factory reject {} {}\nExpires: {}", job.issue.key, gate.phase, report_link, job.id, gate.artifact_digest, gate.id, gate.artifact_digest, gate.id, gate.artifact_digest, gate.deadline);
-    let response: serde_json::Value = http
-        .post("https://slack.com/api/chat.postMessage")
-        .bearer_auth(token)
-        .json(&json!({"channel":channel,"text":text,"client_msg_id":gate_id.to_string()}))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    ensure!(
-        response["ok"] == true,
-        "Slack rejected approval notification"
-    );
-    Ok(())
+    crate::slack::track(store, job.root_id, &channel).await
 }

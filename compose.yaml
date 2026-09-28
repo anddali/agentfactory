@@ -24,11 +24,13 @@ services:
       DATABASE_URL: postgres://factory:${POSTGRES_PASSWORD}@db:5432/factory
       FACTORY_WORKER_SECRET: ${FACTORY_WORKER_SECRET:?Run scripts/setup.ps1}
       FACTORY_IDENTITIES: ${FACTORY_IDENTITIES:?Run scripts/setup.ps1}
-      FACTORY_PUBLIC_READ: "true"
+      FACTORY_PUBLIC_READ: "false"
       FACTORY_ARTIFACT_ROOT: /data/artifacts
       FACTORY_DOCKER_NETWORK: factory_workers
       FACTORY_WORKER_SERVER_URL: http://server:8080
       LLM_API_KEY: ${LLM_API_KEY:-}
+      FACTORY_PORTAL_URL: ${FACTORY_PORTAL_URL:-}
+      FACTORY_SLACK_TEAM_ID: ${FACTORY_SLACK_TEAM_ID:-}
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: ${OTEL_EXPORTER_OTLP_TRACES_HEADERS:-}
     depends_on:
       db: {condition: service_healthy}

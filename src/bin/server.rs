@@ -156,6 +156,24 @@ async fn main() -> Result<()> {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
+    let slack_app = app.clone();
+    let slack_task = tokio::spawn(async move {
+        loop {
+            if let Err(error) = factories::slack::process_one(&slack_app).await {
+                tracing::error!(%error, "Slack interaction processing failed");
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
+    let slack_status_app = app.clone();
+    let slack_status_task = tokio::spawn(async move {
+        loop {
+            if let Err(error) = factories::slack::sync_one(&slack_status_app).await {
+                tracing::error!(%error,"Slack status synchronization failed");
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
     let listener = tokio::net::TcpListener::bind(env("FACTORY_LISTEN", "127.0.0.1:8080")).await?;
     tracing::info!(address=%listener.local_addr()?,"Factories portal ready");
     axum::serve(listener, api::router(app, &env("FACTORY_WEB_ROOT", "web")))
@@ -164,5 +182,7 @@ async fn main() -> Result<()> {
         })
         .await?;
     task.abort();
+    slack_task.abort();
+    slack_status_task.abort();
     Ok(())
 }
