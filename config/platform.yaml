@@ -25,7 +25,7 @@ agents:
     env_keys: [LLM_API_KEY]
     openhands:
       sdk_version: 1.49.2
-      model: openai/gpt-5.6-luna
+      model: openai/gpt-6-sol
       api_key_env: LLM_API_KEY
       base_url: null
       api_mode: auto

@@ -48,7 +48,21 @@ async fn signed(app: Arc<App>, values: &[(&str, String)]) -> (StatusCode, Value)
     let response = hook(State(app), headers, Bytes::from(body)).await;
     let status = response.status();
     let body = to_bytes(response.into_body(), 2_000_000).await.unwrap();
-    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    if values.iter().any(|(key, value)| {
+        *key == "payload"
+            && serde_json::from_str::<Value>(value).is_ok_and(|p| p["type"] == "block_actions")
+    }) && serde_json::from_slice::<Value>(&body).ok() == Some(json!({}))
+    {
+        panic!("Block action acknowledgements must have an empty body, not a visible JSON message");
+    }
+    (
+        status,
+        if body.is_empty() {
+            json!({})
+        } else {
+            serde_json::from_slice(&body).unwrap_or(Value::Null)
+        },
+    )
 }
 async fn click(app: &Arc<App>, payload: Value) -> Value {
     let (status, v) = signed(app.clone(), &[("payload", payload.to_string())]).await;
@@ -256,6 +270,23 @@ async fn complete_journey_permissions_replay_failures_and_followups() -> Result<
         "test",
     )
     .await?;
+    // New URL buttons and cards sent before explicit action IDs were introduced
+    // must be acknowledged without calling views.open or requiring an identity.
+    for action in [
+        link("View details", "https://factory.example/#job/123"),
+        link(
+            "Open pull request",
+            "https://github.com/example/repo/pull/1",
+        ),
+        link("Open full report", "https://factory.example/report/123"),
+        json!({"type":"button","action_id":"slack-generated-legacy-id","url":"https://factory.example/#job/123"}),
+        json!({"type":"button","action_id":"unhandled-action"}),
+    ] {
+        let before = mock.calls.lock().unwrap().len();
+        let result = click(&app, json!({"type":"block_actions","team":{"id":"T_TEST"},"user":{"id":"U_UNMAPPED"},"trigger_id":"link-trigger","actions":[action]})).await;
+        assert_eq!(result, json!({}));
+        assert_eq!(mock.calls.lock().unwrap().len(), before);
+    }
     let bad = hook(
         State(app.clone()),
         HeaderMap::new(),

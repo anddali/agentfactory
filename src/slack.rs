@@ -370,6 +370,14 @@ async fn hook_inner(app: Arc<App>, headers: HeaderMap, body: Bytes) -> Response 
         open_launcher(&app, &form).await
     };
     match result {
+        Ok(v)
+            if v == json!({})
+                && payload
+                    .as_ref()
+                    .is_some_and(|p| p["type"] == "block_actions") =>
+        {
+            StatusCode::OK.into_response()
+        }
         Ok(v) => Json(v).into_response(),
         Err(_) => {
             tracing::warn!(
@@ -473,10 +481,14 @@ async fn interaction(app: &App, p: &Value) -> Result<Value> {
         );
     }
     if p["type"] == "block_actions" {
-        if p["actions"][0]["action_id"] == "factory_edit" {
-            return edit_form(app, p).await;
-        }
-        return open_approval(app, p).await;
+        return match p["actions"][0]["action_id"].as_str() {
+            Some("factory_edit") => edit_form(app, p).await,
+            Some("factory_review_gate") => open_approval(app, p).await,
+            // URL buttons also send callbacks, including old cards with Slack-generated
+            // action IDs. Acknowledge unhandled actions without opening a modal or
+            // granting any authority; only the explicit routes above can act.
+            _ => Ok(json!({})),
+        };
     }
     ensure!(p["type"] == "view_submission", "unsupported interaction");
     let id: Uuid = p["view"]["private_metadata"]
@@ -814,7 +826,7 @@ fn portal(path: &str) -> Option<String> {
     Some(format!("{}#{path}", base.trim_end_matches('/')))
 }
 fn link(label: &str, url: &str) -> Value {
-    json!({"type":"button","text":plain(label),"url":url})
+    json!({"type":"button","text":plain(label),"url":url,"action_id":format!("factory_link_{}",label.to_ascii_lowercase().replace(' ', "_"))})
 }
 async fn approval_view(app: &App, id: Uuid, user: &str, data: &Value) -> Result<Value> {
     let job = app
