@@ -12,14 +12,16 @@ use std::sync::{
 struct Mock {
     calls: Arc<Mutex<Vec<(String, Value)>>>,
     fail: Arc<AtomicBool>,
+    fail_thread: Arc<AtomicBool>,
 }
 async fn slack_api(
     State(mock): State<Mock>,
     Path(method): Path<String>,
     Json(value): Json<Value>,
 ) -> Json<Value> {
+    let thread = method == "chat.postMessage" && !value["thread_ts"].is_null();
     mock.calls.lock().unwrap().push((method.clone(), value));
-    if mock.fail.load(Ordering::SeqCst) {
+    if mock.fail.load(Ordering::SeqCst) || (thread && mock.fail_thread.load(Ordering::SeqCst)) {
         return Json(json!({"ok":false,"error":"ratelimited"}));
     }
     Json(match method.as_str() {
@@ -336,11 +338,41 @@ async fn complete_journey_permissions_replay_failures_and_followups() -> Result<
         .fetch_one(&app.store.pool)
         .await?;
     assert_eq!(count, 1);
-    assert!(sync_one(&app).await?);
     let job = finish_phase(&app, job_id).await;
     let gate = job.gates[0].id;
+    mock.fail_thread.store(true, Ordering::SeqCst);
+    assert!(sync_one(&app).await?);
+    let (ts, milestone, tries): (Option<String>, Option<String>, i32) = sqlx::query_as(
+        "SELECT message_ts,milestone_hash,tries FROM slack_messages WHERE root_id=$1",
+    )
+    .bind(job_id)
+    .fetch_one(&app.store.pool)
+    .await?;
+    assert_eq!(ts.as_deref(), Some("123.456"));
+    assert!(milestone.is_none());
+    assert_eq!(tries, 1);
+    mock.fail_thread.store(false, Ordering::SeqCst);
     due(&app).await;
     assert!(sync_one(&app).await?);
+    let (milestone, tries): (Option<String>, i32) = sqlx::query_as(
+        "SELECT milestone_hash,tries FROM slack_messages WHERE root_id=$1",
+    )
+    .bind(job_id)
+    .fetch_one(&app.store.pool)
+    .await?;
+    assert!(milestone.is_some());
+    assert_eq!(tries, 0);
+    {
+        let calls = mock.calls.lock().unwrap();
+        assert_eq!(
+            calls.iter().filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"].is_null()).count(),
+            1
+        );
+        assert_eq!(
+            calls.iter().filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"] == "123.456").count(),
+            2
+        );
+    }
     let first = fresh_approval(&app, &mock, gate).await;
     let second = fresh_approval(&app, &mock, gate).await;
     let (_, first_view, _) = session(&app, first).await;
@@ -511,6 +543,58 @@ async fn complete_journey_permissions_replay_failures_and_followups() -> Result<
         .fetch_one(&app.store.pool)
         .await?;
     assert!(finished);
+    let mut terminal_snapshot = app.snapshot.clone();
+    for phase in &mut terminal_snapshot.workflows.get_mut("demo").unwrap().phases {
+        phase.gate = None;
+    }
+    terminal_snapshot.refresh_hash()?;
+    let terminal = app
+        .store
+        .submit(
+            &Uuid::new_v4().to_string(),
+            &hash("terminal-first-delivery"),
+            Submission {
+                workflow: "demo".into(),
+                repository: "local-demo".into(),
+                issue: Issue {
+                    provider: "fixture".into(),
+                    key: "TERMINAL-1".into(),
+                    title: "Terminal delivery test".into(),
+                    body: String::new(),
+                    url: None,
+                    ticket: None,
+                },
+            },
+            app.store.job(job_id).await?.repository,
+            terminal_snapshot,
+            "slack:U_ADMIN",
+        )
+        .await?;
+    track(&app.store, terminal.id, "C_TEST").await?;
+    for _ in 0..3 {
+        finish_phase(&app, terminal.id).await;
+    }
+    assert!(app.store.job(terminal.id).await?.status.terminal());
+    let start = mock.calls.lock().unwrap().len();
+    assert!(sync_one(&app).await?);
+    let (milestone, finished): (Option<String>, bool) = sqlx::query_as(
+        "SELECT milestone_hash,finished FROM slack_messages WHERE root_id=$1",
+    )
+    .bind(terminal.id)
+    .fetch_one(&app.store.pool)
+    .await?;
+    assert!(milestone.is_some());
+    assert!(finished);
+    let calls = mock.calls.lock().unwrap();
+    assert_eq!(
+        calls[start..].iter().filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"].is_null()).count(),
+        1
+    );
+    assert_eq!(
+        calls[start..].iter().filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"] == "123.456").count(),
+        1
+    );
+    drop(calls);
     sqlx::query("DELETE FROM connectors WHERE kind='slack'")
         .execute(&app.store.pool)
         .await?;

@@ -1107,7 +1107,7 @@ pub async fn sync_one(app: &App) -> Result<bool> {
             sqlx::query("UPDATE slack_messages SET message_ts=$2 WHERE root_id=$1").bind(root).bind(&ts).execute(&mut *tx).await?;
             ts
         };
-        if ts.is_some()&&significant&&milestone.as_deref()!=Some(&milestone_id) {
+        if significant&&milestone.as_deref()!=Some(&milestone_id) {
             rpc(app,"chat.postMessage",json!({"channel":channel,"thread_ts":message_ts,"text":slack_text(&format!("{} · {}",job.issue.title,status(&job))),"client_msg_id":format!("{}",Uuid::from_bytes(hex::decode(&milestone_id[..32])?.try_into().unwrap())),"unfurl_links":false,"parse":"none"})).await?;
         }
         Ok(())
