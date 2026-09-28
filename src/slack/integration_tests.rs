@@ -385,22 +385,27 @@ async fn complete_journey_permissions_replay_failures_and_followups() -> Result<
     mock.fail_thread.store(false, Ordering::SeqCst);
     due(&app).await;
     assert!(sync_one(&app).await?);
-    let (milestone, tries): (Option<String>, i32) = sqlx::query_as(
-        "SELECT milestone_hash,tries FROM slack_messages WHERE root_id=$1",
-    )
-    .bind(job_id)
-    .fetch_one(&app.store.pool)
-    .await?;
+    let (milestone, tries): (Option<String>, i32) =
+        sqlx::query_as("SELECT milestone_hash,tries FROM slack_messages WHERE root_id=$1")
+            .bind(job_id)
+            .fetch_one(&app.store.pool)
+            .await?;
     assert!(milestone.is_some());
     assert_eq!(tries, 0);
     {
         let calls = mock.calls.lock().unwrap();
         assert_eq!(
-            calls.iter().filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"].is_null()).count(),
+            calls
+                .iter()
+                .filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"].is_null())
+                .count(),
             1
         );
         assert_eq!(
-            calls.iter().filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"] == "123.456").count(),
+            calls
+                .iter()
+                .filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"] == "123.456")
+                .count(),
             2
         );
     }
@@ -608,21 +613,26 @@ async fn complete_journey_permissions_replay_failures_and_followups() -> Result<
     assert!(app.store.job(terminal.id).await?.status.terminal());
     let start = mock.calls.lock().unwrap().len();
     assert!(sync_one(&app).await?);
-    let (milestone, finished): (Option<String>, bool) = sqlx::query_as(
-        "SELECT milestone_hash,finished FROM slack_messages WHERE root_id=$1",
-    )
-    .bind(terminal.id)
-    .fetch_one(&app.store.pool)
-    .await?;
+    let (milestone, finished): (Option<String>, bool) =
+        sqlx::query_as("SELECT milestone_hash,finished FROM slack_messages WHERE root_id=$1")
+            .bind(terminal.id)
+            .fetch_one(&app.store.pool)
+            .await?;
     assert!(milestone.is_some());
     assert!(finished);
     let calls = mock.calls.lock().unwrap();
     assert_eq!(
-        calls[start..].iter().filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"].is_null()).count(),
+        calls[start..]
+            .iter()
+            .filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"].is_null())
+            .count(),
         1
     );
     assert_eq!(
-        calls[start..].iter().filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"] == "123.456").count(),
+        calls[start..]
+            .iter()
+            .filter(|(m, v)| m == "chat.postMessage" && v["thread_ts"] == "123.456")
+            .count(),
         1
     );
     drop(calls);
